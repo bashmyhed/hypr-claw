@@ -599,6 +599,7 @@ dependencies = [
  "hypr-claw-runtime",
  "hypr_claw",
  "hypr_claw_tools",
+ "parking_lot",
  "serde_json",
  "tokio",
 ]

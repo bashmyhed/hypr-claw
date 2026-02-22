@@ -13,3 +13,6 @@ hypr_claw_tools = { path = "../hypr-claw-tools" }
 hypr-claw-runtime = { path = "../hypr-claw-runtime" }
 tokio = { version = "1.36", features = ["full"] }
 serde_json = "1.0"
+
+[dev-dependencies]
+parking_lot = "0.12"

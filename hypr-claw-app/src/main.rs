@@ -4,36 +4,71 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create directories
-    std::fs::create_dir_all("./data/sessions")?;
-    std::fs::create_dir_all("./data/credentials")?;
-    std::fs::create_dir_all("./data/agents")?;
-    if !std::path::Path::new("./data/audit.log").exists() {
-        std::fs::File::create("./data/audit.log")?;
-    }
-    std::fs::create_dir_all("./sandbox")?;
+    // Print banner
+    println!("╔══════════════════════════════════════════════════════════════════╗");
+    println!("║              Hypr-Claw Terminal Agent                            ║");
+    println!("╚══════════════════════════════════════════════════════════════════╝");
+    println!();
 
-    // Create default agent config if it doesn't exist
-    let default_agent_config = "./data/agents/default.yaml";
-    let default_agent_soul = "./data/agents/default_soul.md";
-    if !std::path::Path::new(default_agent_config).exists() {
-        std::fs::write(
-            default_agent_config,
-            "id: default\nsoul: default_soul.md\ntools:\n  - echo\n  - file_read\n  - file_write\n  - file_list\n  - shell_exec\n"
-        )?;
+    // Initialize directories
+    if let Err(e) = initialize_directories() {
+        eprintln!("❌ Failed to initialize directories: {}", e);
+        return Err(e);
     }
-    if !std::path::Path::new(default_agent_soul).exists() {
-        std::fs::write(
-            default_agent_soul,
-            "You are a helpful assistant with access to file operations and shell commands."
-        )?;
+
+    // Get user input
+    print!("Enter LLM base URL: ");
+    io::stdout().flush()?;
+    let mut llm_url = String::new();
+    io::stdin().read_line(&mut llm_url)?;
+    let llm_url = llm_url.trim().to_string();
+
+    print!("Enter agent name [default]: ");
+    io::stdout().flush()?;
+    let mut agent_name = String::new();
+    io::stdin().read_line(&mut agent_name)?;
+    let agent_name = agent_name.trim();
+    let agent_name = if agent_name.is_empty() { "default" } else { agent_name };
+
+    print!("Enter user ID [local_user]: ");
+    io::stdout().flush()?;
+    let mut user_id = String::new();
+    io::stdin().read_line(&mut user_id)?;
+    let user_id = user_id.trim();
+    let user_id = if user_id.is_empty() { "local_user" } else { user_id };
+
+    print!("Enter task: ");
+    io::stdout().flush()?;
+    let mut task = String::new();
+    io::stdin().read_line(&mut task)?;
+    let task = task.trim().to_string();
+
+    if task.is_empty() {
+        eprintln!("❌ Task cannot be empty");
+        return Ok(());
     }
+
+    println!("\n🔧 Initializing system...");
 
     // Initialize infrastructure
-    let session_store = Arc::new(hypr_claw::infra::session_store::SessionStore::new("./data/sessions")?);
+    let session_store = match hypr_claw::infra::session_store::SessionStore::new("./data/sessions") {
+        Ok(store) => Arc::new(store),
+        Err(e) => {
+            eprintln!("❌ Failed to initialize session store: {}", e);
+            return Err(Box::new(e));
+        }
+    };
+
     let lock_manager = Arc::new(hypr_claw::infra::lock_manager::LockManager::new(Duration::from_secs(30)));
     let permission_engine = Arc::new(hypr_claw::infra::permission_engine::PermissionEngine::new());
-    let audit_logger = Arc::new(hypr_claw::infra::audit_logger::AuditLogger::new("./data/audit.log")?);
+    
+    let audit_logger = match hypr_claw::infra::audit_logger::AuditLogger::new("./data/audit.log") {
+        Ok(logger) => Arc::new(logger),
+        Err(e) => {
+            eprintln!("❌ Failed to initialize audit logger: {}", e);
+            return Err(Box::new(e));
+        }
+    };
 
     // Wrap in async adapters
     let async_session = Arc::new(hypr_claw_runtime::AsyncSessionStore::new(session_store));
@@ -42,18 +77,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create tool registry
     let mut registry = hypr_claw_tools::ToolRegistryImpl::new();
     registry.register(Arc::new(hypr_claw_tools::tools::EchoTool));
-    registry.register(Arc::new(
-        hypr_claw_tools::tools::FileReadTool::new("./sandbox")
-            .map_err(|e| format!("Failed to create FileReadTool: {}", e))?
-    ));
-    registry.register(Arc::new(
-        hypr_claw_tools::tools::FileWriteTool::new("./sandbox")
-            .map_err(|e| format!("Failed to create FileWriteTool: {}", e))?
-    ));
-    registry.register(Arc::new(
-        hypr_claw_tools::tools::FileListTool::new("./sandbox")
-            .map_err(|e| format!("Failed to create FileListTool: {}", e))?
-    ));
+    
+    if let Ok(tool) = hypr_claw_tools::tools::FileReadTool::new("./sandbox") {
+        registry.register(Arc::new(tool));
+    } else {
+        eprintln!("⚠️  Warning: FileReadTool initialization failed");
+    }
+    
+    if let Ok(tool) = hypr_claw_tools::tools::FileWriteTool::new("./sandbox") {
+        registry.register(Arc::new(tool));
+    } else {
+        eprintln!("⚠️  Warning: FileWriteTool initialization failed");
+    }
+    
+    if let Ok(tool) = hypr_claw_tools::tools::FileListTool::new("./sandbox") {
+        registry.register(Arc::new(tool));
+    } else {
+        eprintln!("⚠️  Warning: FileListTool initialization failed");
+    }
+    
     registry.register(Arc::new(hypr_claw_tools::tools::ShellExecTool));
 
     let registry_arc = Arc::new(registry);
@@ -70,27 +112,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_dispatcher = Arc::new(RuntimeDispatcherAdapter::new(dispatcher));
     let runtime_registry = Arc::new(RuntimeRegistryAdapter::new(registry_arc));
 
-    // Get user input
-    print!("Enter LLM base URL: ");
-    io::stdout().flush()?;
-    let mut llm_url = String::new();
-    io::stdin().read_line(&mut llm_url)?;
-    let llm_url = llm_url.trim();
-
-    print!("Enter agent name: ");
-    io::stdout().flush()?;
-    let mut agent_name = String::new();
-    io::stdin().read_line(&mut agent_name)?;
-    let agent_name = agent_name.trim();
-
-    print!("Enter your task: ");
-    io::stdout().flush()?;
-    let mut task = String::new();
-    io::stdin().read_line(&mut task)?;
-    let task = task.trim();
-
     // Initialize LLM client
-    let llm_client = hypr_claw_runtime::LLMClient::new(llm_url.to_string(), 1);
+    let llm_client = hypr_claw_runtime::LLMClient::new(llm_url, 1);
 
     // Create compactor
     let compactor = hypr_claw_runtime::Compactor::new(4000, SimpleSummarizer);
@@ -110,19 +133,83 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let controller = hypr_claw_runtime::RuntimeController::new(agent_loop, "./data/agents".to_string());
 
     // Execute
-    println!("\n=== Executing ===");
-    match controller.execute("default_user", agent_name, task).await {
+    println!("✅ System initialized");
+    println!("\n🤖 Executing task for user '{}' with agent '{}'...\n", user_id, agent_name);
+    
+    match controller.execute(user_id, agent_name, &task).await {
         Ok(response) => {
-            println!("\n=== Response ===");
+            println!("\n╔══════════════════════════════════════════════════════════════════╗");
+            println!("║                         Response                                 ║");
+            println!("╚══════════════════════════════════════════════════════════════════╝");
             println!("{}", response);
+            println!("\n✅ Task completed successfully");
             Ok(())
         }
         Err(e) => {
-            eprintln!("\n=== Error ===");
-            eprintln!("{}", e);
+            eprintln!("\n╔══════════════════════════════════════════════════════════════════╗");
+            eprintln!("║                          Error                                   ║");
+            eprintln!("╚══════════════════════════════════════════════════════════════════╝");
+            
+            match &e {
+                hypr_claw_runtime::RuntimeError::LLMError(msg) => {
+                    eprintln!("❌ LLM Error: {}", msg);
+                    eprintln!("\n💡 Tip: Check that your LLM service is running and accessible");
+                }
+                hypr_claw_runtime::RuntimeError::ToolError(msg) => {
+                    eprintln!("❌ Tool Error: {}", msg);
+                }
+                hypr_claw_runtime::RuntimeError::LockError(msg) => {
+                    eprintln!("❌ Lock Error: {}", msg);
+                    eprintln!("\n💡 Tip: Another session may be active. Wait 30 seconds and try again");
+                }
+                hypr_claw_runtime::RuntimeError::SessionError(msg) => {
+                    eprintln!("❌ Session Error: {}", msg);
+                    eprintln!("\n💡 Tip: Check disk space and permissions in ./data/sessions");
+                }
+                hypr_claw_runtime::RuntimeError::ConfigError(msg) => {
+                    eprintln!("❌ Config Error: {}", msg);
+                    eprintln!("\n💡 Tip: Check that ./data/agents/{}.yaml exists", agent_name);
+                }
+                _ => {
+                    eprintln!("❌ Error: {}", e);
+                }
+            }
+            
             Err(Box::new(e) as Box<dyn std::error::Error>)
         }
     }
+}
+
+fn initialize_directories() -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::create_dir_all("./data/sessions")?;
+    std::fs::create_dir_all("./data/credentials")?;
+    std::fs::create_dir_all("./data/agents")?;
+    
+    if !std::path::Path::new("./data/audit.log").exists() {
+        std::fs::File::create("./data/audit.log")?;
+    }
+    
+    std::fs::create_dir_all("./sandbox")?;
+
+    // Create default agent config if it doesn't exist
+    let default_agent_config = "./data/agents/default.yaml";
+    let default_agent_soul = "./data/agents/default_soul.md";
+    
+    if !std::path::Path::new(default_agent_config).exists() {
+        std::fs::write(
+            default_agent_config,
+            "id: default\nsoul: default_soul.md\ntools:\n  - echo\n  - file_read\n  - file_write\n  - file_list\n  - shell_exec\n"
+        )?;
+    }
+    
+    if !std::path::Path::new(default_agent_soul).exists() {
+        std::fs::write(
+            default_agent_soul,
+            "You are a helpful assistant with access to file operations and shell commands."
+        )?;
+    }
+
+    Ok(())
 }
 
 // Adapter for ToolDispatcher
