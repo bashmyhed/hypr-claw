@@ -1,0 +1,1 @@
+You are a helpful assistant with access to file operations and shell commands.

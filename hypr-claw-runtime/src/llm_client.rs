@@ -78,17 +78,18 @@ pub struct LLMClient {
     client: reqwest::Client,
     max_retries: u32,
     circuit_breaker: Arc<CircuitBreaker>,
+    api_key: Option<String>,
 }
 
 impl LLMClient {
     /// Create a new LLM client.
     ///
     /// # Arguments
-    /// * `base_url` - Base URL of the Python LLM service
+    /// * `base_url` - Base URL of the LLM service
     /// * `max_retries` - Maximum number of retries on failure
     pub fn new(base_url: String, max_retries: u32) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(60))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         
@@ -97,7 +98,15 @@ impl LLMClient {
             client,
             max_retries,
             circuit_breaker: Arc::new(CircuitBreaker::new(5, Duration::from_secs(30))),
+            api_key: None,
         }
+    }
+
+    /// Create a new LLM client with API key for authentication.
+    pub fn with_api_key(base_url: String, max_retries: u32, api_key: String) -> Self {
+        let mut client = Self::new(base_url, max_retries);
+        client.api_key = Some(api_key);
+        client
     }
 
     /// Call LLM service with retry logic.
@@ -164,19 +173,29 @@ impl LLMClient {
             tools: tools.to_vec(),
         };
         
-        let response = self
+        let mut req_builder = self
             .client
-            .post(format!("{}/llm/call", self.base_url))
-            .json(&request)
+            .post(format!("{}/chat/completions", self.base_url))
+            .json(&request);
+
+        // Add Authorization header if API key is present
+        if let Some(api_key) = &self.api_key {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        let response = req_builder
             .send()
             .await
             .map_err(|e| RuntimeError::LLMError(format!("HTTP request failed: {}", e)))?;
         
-        if !response.status().is_success() {
-            return Err(RuntimeError::LLMError(format!(
-                "HTTP error: {}",
-                response.status()
-            )));
+        let status = response.status();
+        if !status.is_success() {
+            let error_msg = match status.as_u16() {
+                401 => "Invalid API key (401 Unauthorized)".to_string(),
+                429 => "Rate limit exceeded (429 Too Many Requests)".to_string(),
+                _ => format!("HTTP error: {}", status),
+            };
+            return Err(RuntimeError::LLMError(error_msg));
         }
         
         let llm_response: LLMResponse = response

@@ -1,0 +1,8 @@
+id: default
+soul: default_soul.md
+tools:
+  - echo
+  - file_read
+  - file_write
+  - file_list
+  - shell_exec

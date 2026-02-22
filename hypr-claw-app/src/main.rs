@@ -2,8 +2,19 @@ use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
+pub mod config;
+pub mod bootstrap;
+
+use config::{Config, LLMProvider};
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Parse CLI arguments
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && args[1] == "config" && args.get(2).map(|s| s.as_str()) == Some("reset") {
+        return handle_config_reset();
+    }
+
     // Print banner
     println!("╔══════════════════════════════════════════════════════════════════╗");
     println!("║              Hypr-Claw Terminal Agent                            ║");
@@ -16,13 +27,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(e);
     }
 
-    // Get user input
-    print!("Enter LLM base URL: ");
-    io::stdout().flush()?;
-    let mut llm_url = String::new();
-    io::stdin().read_line(&mut llm_url)?;
-    let llm_url = llm_url.trim().to_string();
+    // Load or bootstrap configuration
+    let config = if Config::exists() {
+        match Config::load() {
+            Ok(cfg) => {
+                if let Err(e) = cfg.validate() {
+                    eprintln!("❌ Invalid configuration: {}", e);
+                    eprintln!("💡 Tip: Run 'hypr-claw config reset' to reconfigure");
+                    return Err(e.into());
+                }
+                cfg
+            }
+            Err(e) => {
+                eprintln!("❌ Failed to load config: {}", e);
+                eprintln!("💡 Tip: Run 'hypr-claw config reset' to reconfigure");
+                return Err(e.into());
+            }
+        }
+    } else {
+        match bootstrap::run_bootstrap() {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("❌ Bootstrap failed: {}", e);
+                return Err(e.into());
+            }
+        }
+    };
 
+    // Display provider info
+    let provider_name = match &config.provider {
+        LLMProvider::Nvidia => "NVIDIA Kimi",
+        LLMProvider::Local { .. } => "Local",
+    };
+    println!("Using provider: {}", provider_name);
+    println!();
+
+    // Get user input
     print!("Enter agent name [default]: ");
     io::stdout().flush()?;
     let mut agent_name = String::new();
@@ -112,8 +152,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_dispatcher = Arc::new(RuntimeDispatcherAdapter::new(dispatcher));
     let runtime_registry = Arc::new(RuntimeRegistryAdapter::new(registry_arc));
 
-    // Initialize LLM client
-    let llm_client = hypr_claw_runtime::LLMClient::new(llm_url, 1);
+    // Initialize LLM client based on provider
+    let llm_client = match &config.provider {
+        LLMProvider::Nvidia => {
+            let api_key = match bootstrap::get_nvidia_api_key() {
+                Ok(key) => key,
+                Err(e) => {
+                    eprintln!("❌ Failed to retrieve NVIDIA API key: {}", e);
+                    eprintln!("💡 Tip: Run 'hypr-claw config reset' to reconfigure");
+                    return Err(e.into());
+                }
+            };
+            hypr_claw_runtime::LLMClient::with_api_key(
+                config.provider.base_url(),
+                1,
+                api_key,
+            )
+        }
+        LLMProvider::Local { .. } => {
+            hypr_claw_runtime::LLMClient::new(config.provider.base_url(), 1)
+        }
+    };
 
     // Create compactor
     let compactor = hypr_claw_runtime::Compactor::new(4000, SimpleSummarizer);
@@ -153,7 +212,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match &e {
                 hypr_claw_runtime::RuntimeError::LLMError(msg) => {
                     eprintln!("❌ LLM Error: {}", msg);
-                    eprintln!("\n💡 Tip: Check that your LLM service is running and accessible");
+                    if msg.contains("401") {
+                        eprintln!("\n💡 Tip: Your API key may be invalid. Run 'hypr-claw config reset' to reconfigure");
+                    } else if msg.contains("429") {
+                        eprintln!("\n💡 Tip: Rate limit exceeded. Wait a moment and try again");
+                    } else {
+                        eprintln!("\n💡 Tip: Check that your LLM service is running and accessible");
+                    }
                 }
                 hypr_claw_runtime::RuntimeError::ToolError(msg) => {
                     eprintln!("❌ Tool Error: {}", msg);
@@ -178,6 +243,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(Box::new(e) as Box<dyn std::error::Error>)
         }
     }
+}
+
+fn handle_config_reset() -> Result<(), Box<dyn std::error::Error>> {
+    println!("Resetting configuration...");
+    
+    Config::delete()?;
+    
+    if let Err(e) = bootstrap::delete_nvidia_api_key() {
+        // Ignore if key doesn't exist
+        if !e.to_string().contains("not found") {
+            eprintln!("⚠️  Warning: Failed to delete API key: {}", e);
+        }
+    }
+    
+    println!("✅ Configuration reset. Run hypr-claw again to reconfigure.");
+    Ok(())
 }
 
 fn initialize_directories() -> Result<(), Box<dyn std::error::Error>> {
