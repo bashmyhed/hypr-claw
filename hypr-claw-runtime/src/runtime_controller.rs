@@ -5,6 +5,8 @@ use crate::agent_loop::AgentLoop;
 use crate::compactor::Summarizer;
 use crate::gateway::resolve_session;
 use crate::interfaces::{LockManager, RuntimeError, SessionStore, ToolDispatcher, ToolRegistry};
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tracing::{debug, error, info};
 
 /// Main runtime controller.
@@ -18,6 +20,7 @@ where
 {
     agent_loop: AgentLoop<S, L, D, R, Sum>,
     config_dir: String,
+    concurrency_limiter: Arc<Semaphore>,
 }
 
 impl<S, L, D, R, Sum> RuntimeController<S, L, D, R, Sum>
@@ -34,9 +37,24 @@ where
     /// * `agent_loop` - Configured agent loop instance
     /// * `config_dir` - Directory containing agent configs
     pub fn new(agent_loop: AgentLoop<S, L, D, R, Sum>, config_dir: String) -> Self {
+        Self::with_max_concurrent_sessions(agent_loop, config_dir, 100)
+    }
+
+    /// Create a new runtime controller with custom concurrency limit.
+    ///
+    /// # Arguments
+    /// * `agent_loop` - Configured agent loop instance
+    /// * `config_dir` - Directory containing agent configs
+    /// * `max_concurrent_sessions` - Maximum concurrent sessions allowed
+    pub fn with_max_concurrent_sessions(
+        agent_loop: AgentLoop<S, L, D, R, Sum>,
+        config_dir: String,
+        max_concurrent_sessions: usize,
+    ) -> Self {
         Self {
             agent_loop,
             config_dir,
+            concurrency_limiter: Arc::new(Semaphore::new(max_concurrent_sessions)),
         }
     }
 
@@ -55,6 +73,13 @@ where
         agent_id: &str,
         user_message: &str,
     ) -> Result<String, RuntimeError> {
+        // Acquire concurrency permit
+        let _permit = self
+            .concurrency_limiter
+            .acquire()
+            .await
+            .map_err(|e| RuntimeError::SessionError(format!("Concurrency limit error: {}", e)))?;
+
         // Resolve session
         info!("Processing request: user={}, agent={}", user_id, agent_id);
         let session_key = resolve_session(user_id, agent_id)?;

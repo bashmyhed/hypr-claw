@@ -52,6 +52,8 @@ impl<S: Summarizer> Compactor<S> {
             "Token count {} exceeds threshold {}, compacting",
             token_count, self.threshold
         );
+
+        crate::metrics::increment_compaction_count();
         
         // Split messages: older half to summarize, newer half to keep
         let split_point = messages.len() / 2;

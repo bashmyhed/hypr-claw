@@ -3,7 +3,10 @@
 use crate::interfaces::RuntimeError;
 use crate::types::{LLMResponse, Message};
 use serde::Serialize;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use parking_lot::Mutex;
 use tracing::{debug, warn};
 
 /// Request payload for LLM service.
@@ -14,12 +17,67 @@ struct LLMRequest {
     tools: Vec<String>,
 }
 
+/// Circuit breaker state.
+struct CircuitBreaker {
+    consecutive_failures: AtomicUsize,
+    breaker_open: AtomicBool,
+    opened_at: Mutex<Option<Instant>>,
+    failure_threshold: usize,
+    cooldown_duration: Duration,
+}
+
+impl CircuitBreaker {
+    fn new(failure_threshold: usize, cooldown_duration: Duration) -> Self {
+        Self {
+            consecutive_failures: AtomicUsize::new(0),
+            breaker_open: AtomicBool::new(false),
+            opened_at: Mutex::new(None),
+            failure_threshold,
+            cooldown_duration,
+        }
+    }
+
+    fn record_success(&self) {
+        self.consecutive_failures.store(0, Ordering::SeqCst);
+        self.breaker_open.store(false, Ordering::SeqCst);
+        *self.opened_at.lock() = None;
+    }
+
+    fn record_failure(&self) {
+        let failures = self.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+        if failures >= self.failure_threshold {
+            self.breaker_open.store(true, Ordering::SeqCst);
+            *self.opened_at.lock() = Some(Instant::now());
+        }
+    }
+
+    fn should_allow_request(&self) -> Result<(), RuntimeError> {
+        if !self.breaker_open.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        let opened_at = self.opened_at.lock();
+        if let Some(opened_time) = *opened_at {
+            if opened_time.elapsed() >= self.cooldown_duration {
+                drop(opened_at);
+                // Allow trial request
+                return Ok(());
+            }
+        }
+
+        Err(RuntimeError::LLMError(
+            "Circuit breaker open: LLM service unavailable".to_string(),
+        ))
+    }
+}
+
 /// LLM client for calling Python service via HTTP.
 #[derive(Clone)]
 pub struct LLMClient {
     base_url: String,
     client: reqwest::Client,
     max_retries: u32,
+    circuit_breaker: Arc<CircuitBreaker>,
 }
 
 impl LLMClient {
@@ -38,6 +96,7 @@ impl LLMClient {
             base_url,
             client,
             max_retries,
+            circuit_breaker: Arc::new(CircuitBreaker::new(5, Duration::from_secs(30))),
         }
     }
 
@@ -59,13 +118,21 @@ impl LLMClient {
         messages: &[Message],
         tools: &[String],
     ) -> Result<LLMResponse, RuntimeError> {
+        let _timer = crate::metrics::MetricTimer::new("llm_request_latency");
+
+        // Check circuit breaker
+        self.circuit_breaker.should_allow_request()?;
+
         let mut last_error = None;
         
         for attempt in 0..=self.max_retries {
             debug!("LLM call attempt {}/{}", attempt + 1, self.max_retries + 1);
             
             match self.call_once(system_prompt, messages, tools).await {
-                Ok(response) => return Ok(response),
+                Ok(response) => {
+                    self.circuit_breaker.record_success();
+                    return Ok(response);
+                }
                 Err(e) => {
                     warn!("LLM call failed (attempt {}): {}", attempt + 1, e);
                     last_error = Some(e);
@@ -75,6 +142,8 @@ impl LLMClient {
                 }
             }
         }
+        
+        self.circuit_breaker.record_failure();
         
         Err(RuntimeError::LLMError(format!(
             "LLM call failed after {} attempts: {}",
@@ -122,7 +191,7 @@ impl LLMClient {
 
     fn validate_response(&self, response: &LLMResponse) -> Result<(), RuntimeError> {
         match response {
-            LLMResponse::Final { content } => {
+            LLMResponse::Final { content, .. } => {
                 if content.is_empty() {
                     return Err(RuntimeError::LLMError(
                         "Final response has empty content".to_string(),
@@ -156,6 +225,7 @@ mod tests {
         let client = LLMClient::new("http://localhost:8000".to_string(), 1);
         
         let response = LLMResponse::Final {
+            schema_version: crate::types::SCHEMA_VERSION,
             content: "Hello".to_string(),
         };
         assert!(client.validate_response(&response).is_ok());
@@ -166,6 +236,7 @@ mod tests {
         let client = LLMClient::new("http://localhost:8000".to_string(), 1);
         
         let response = LLMResponse::Final {
+            schema_version: crate::types::SCHEMA_VERSION,
             content: "".to_string(),
         };
         let result = client.validate_response(&response);
@@ -183,6 +254,7 @@ mod tests {
         let client = LLMClient::new("http://localhost:8000".to_string(), 1);
         
         let response = LLMResponse::ToolCall {
+            schema_version: crate::types::SCHEMA_VERSION,
             tool_name: "search".to_string(),
             input: json!({"query": "test"}),
         };
@@ -194,6 +266,7 @@ mod tests {
         let client = LLMClient::new("http://localhost:8000".to_string(), 1);
         
         let response = LLMResponse::ToolCall {
+            schema_version: crate::types::SCHEMA_VERSION,
             tool_name: "".to_string(),
             input: json!({"query": "test"}),
         };

@@ -6,7 +6,6 @@ mod tests {
     use std::sync::Arc;
     use serde_json::json;
     use async_trait::async_trait;
-    use tempfile;
 
     // Mock implementations for testing
     struct MockPermissionEngine;

@@ -56,6 +56,7 @@ fn test_llm_response_deep_nested_json() {
     }
     
     let response = LLMResponse::ToolCall {
+        schema_version: hypr_claw_runtime::SCHEMA_VERSION,
         tool_name: "test".to_string(),
         input: nested,
     };
@@ -78,6 +79,7 @@ fn test_llm_response_large_payload() {
     let large_content = "A".repeat(1_000_000); // 1MB
     
     let response = LLMResponse::Final {
+        schema_version: hypr_claw_runtime::SCHEMA_VERSION,
         content: large_content.clone(),
     };
     
@@ -87,7 +89,7 @@ fn test_llm_response_large_payload() {
     
     let deserialized: LLMResponse = serde_json::from_str(&serialized).unwrap();
     match deserialized {
-        LLMResponse::Final { content } => {
+        LLMResponse::Final { content, schema_version: hypr_claw_runtime::SCHEMA_VERSION } => {
             assert_eq!(content.len(), 1_000_000);
         }
         _ => panic!("Expected Final"),
@@ -123,7 +125,7 @@ fn test_message_arbitrary_json_content() {
 proptest! {
     #[test]
     fn test_llm_response_final_never_panics(content in ".*") {
-        let response = LLMResponse::Final { content };
+        let response = LLMResponse::Final { content, schema_version: hypr_claw_runtime::SCHEMA_VERSION };
         
         // Should serialize without panic
         let serialized = serde_json::to_string(&response);
@@ -142,6 +144,7 @@ proptest! {
         query in ".*"
     ) {
         let response = LLMResponse::ToolCall {
+        schema_version: hypr_claw_runtime::SCHEMA_VERSION,
             tool_name,
             input: json!({"query": query}),
         };
@@ -192,6 +195,7 @@ proptest! {
 fn test_empty_strings_handled_safely() {
     // Empty tool name should be caught by validation
     let response = LLMResponse::ToolCall {
+        schema_version: hypr_claw_runtime::SCHEMA_VERSION,
         tool_name: "".to_string(),
         input: json!({}),
     };
@@ -202,6 +206,7 @@ fn test_empty_strings_handled_safely() {
     
     // Empty content should be caught by validation
     let response = LLMResponse::Final {
+        schema_version: hypr_claw_runtime::SCHEMA_VERSION,
         content: "".to_string(),
     };
     
@@ -223,6 +228,7 @@ fn test_special_characters_in_content() {
     
     for chars in special_chars {
         let response = LLMResponse::Final {
+        schema_version: hypr_claw_runtime::SCHEMA_VERSION,
             content: chars.to_string(),
         };
         
@@ -231,7 +237,7 @@ fn test_special_characters_in_content() {
         let deserialized: LLMResponse = serde_json::from_str(&serialized).unwrap();
         
         match deserialized {
-            LLMResponse::Final { content } => {
+            LLMResponse::Final { content, schema_version: hypr_claw_runtime::SCHEMA_VERSION } => {
                 assert_eq!(content, chars);
             }
             _ => panic!("Expected Final"),

@@ -11,8 +11,9 @@ pub mod compactor;
 pub mod agent_loop;
 pub mod runtime_controller;
 pub mod async_adapters;
+pub mod metrics;
 
-pub use types::{LLMResponse, Message, Role};
+pub use types::{LLMResponse, Message, Role, SCHEMA_VERSION};
 pub use interfaces::{RuntimeError, SessionStore, LockManager, ToolDispatcher, ToolRegistry};
 pub use gateway::resolve_session;
 pub use agent_config::{AgentConfig, load_agent_config};

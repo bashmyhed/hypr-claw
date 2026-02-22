@@ -153,6 +153,7 @@ async fn test_malformed_llm_output() {
     // Test that LLM response validation works via type system
     // Empty final response is caught by validation
     let response = LLMResponse::Final {
+        schema_version: hypr_claw_runtime::SCHEMA_VERSION,
         content: "".to_string(),
     };
     // Serialization works
@@ -161,6 +162,7 @@ async fn test_malformed_llm_output() {
     
     // Empty tool name
     let response = LLMResponse::ToolCall {
+        schema_version: hypr_claw_runtime::SCHEMA_VERSION,
         tool_name: "".to_string(),
         input: json!({}),
     };
@@ -270,17 +272,19 @@ fn test_message_serialization_roundtrip() {
 fn test_llm_response_serialization_roundtrip() {
     // Final response
     let response = LLMResponse::Final {
+        schema_version: hypr_claw_runtime::SCHEMA_VERSION,
         content: "Done".to_string(),
     };
     let serialized = serde_json::to_string(&response).unwrap();
     let deserialized: LLMResponse = serde_json::from_str(&serialized).unwrap();
     match deserialized {
-        LLMResponse::Final { content } => assert_eq!(content, "Done"),
+        LLMResponse::Final { content, .. } => assert_eq!(content, "Done"),
         _ => panic!("Expected Final response"),
     }
 
     // Tool call response
     let response = LLMResponse::ToolCall {
+        schema_version: hypr_claw_runtime::SCHEMA_VERSION,
         tool_name: "search".to_string(),
         input: json!({"query": "test"}),
     };

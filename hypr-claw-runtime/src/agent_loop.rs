@@ -150,11 +150,11 @@ where
 
             // Handle response type
             match response {
-                LLMResponse::Final { content } => {
+                LLMResponse::Final { content, .. } => {
                     info!("LLM returned final response after {} iterations", iteration + 1);
                     return Ok(content);
                 }
-                LLMResponse::ToolCall { tool_name, input } => {
+                LLMResponse::ToolCall { tool_name, input, .. } => {
                     info!("LLM requested tool: {}", tool_name);
 
                     // Append tool call message

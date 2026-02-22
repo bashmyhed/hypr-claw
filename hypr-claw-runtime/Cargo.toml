@@ -24,6 +24,12 @@ tracing-subscriber = "0.3"
 parking_lot = "0.12"
 async-trait = "0.1"
 hypr_claw = { path = "../hypr-claw-infra" }
+metrics = "0.21"
+metrics-exporter-prometheus = { version = "0.13", optional = true }
+
+[features]
+default = []
+prometheus = ["metrics-exporter-prometheus"]
 
 [dev-dependencies]
 tokio-test = "0.4"
