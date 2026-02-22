@@ -91,11 +91,11 @@ The agent doesn't just execute commands blindly. It:
 
 Example: "Create a backup system"
 ```
-Step 1: Check available disk space ✓
-Step 2: Create backup directory ✓
-Step 3: Identify files to backup ✓
-Step 4: Compress files ✓
-Step 5: Verify backup integrity ✓
+Step 1: Check available disk space [DONE]
+Step 2: Create backup directory [DONE]
+Step 3: Identify files to backup [DONE]
+Step 4: Compress files [DONE]
+Step 5: Verify backup integrity [DONE]
 ```
 
 ### 3. Environment Awareness
@@ -269,7 +269,7 @@ User Input: "Create a file named test.txt with hello world"
 ┌─────────────────────────────────────────────────────────────┐
 │ 6. Update Memory                                            │
 │    • Add to history: Tool call + result                     │
-│    • Update plan: Step 1 complete ✓                         │
+│    • Update plan: Step 1 complete [DONE]                    │
 │    • Update tool stats: file_write +1 success               │
 └────────────────────────────┬────────────────────────────────┘
                              │
@@ -630,7 +630,7 @@ Tool Call (SystemCritical)
           ▼       └─► Execute
 ┌─────────────────────────────────┐
 │  Request User Approval          │
-│  "⚠️  Approval required: ..."   │
+│  "[WARNING] Approval required"  │
 │  "Approve? (y/n): "             │
 └─────────────┬───────────────────┘
               │
@@ -650,12 +650,12 @@ Tool Call (SystemCritical)
 All file operations are restricted to `./sandbox/`:
 
 **Blocked:**
-- `file_read("../../../etc/passwd")` ❌
-- `file_read("/etc/passwd")` ❌
+- `file_read("../../../etc/passwd")` [BLOCKED]
+- `file_read("/etc/passwd")` [BLOCKED]
 
 **Allowed:**
-- `file_read("data.txt")` ✅
-- `file_read("subdir/file.txt")` ✅
+- `file_read("data.txt")` [ALLOWED]
+- `file_read("subdir/file.txt")` [ALLOWED]
 
 **Security checks:**
 - Path traversal prevention
@@ -819,24 +819,24 @@ export SOULS_DIR="./souls"
 
 ## Roadmap
 
-### Completed (Phase 1-3) ✅
+### Completed (Phase 1-3) [COMPLETE]
 
-- ✅ Layered architecture with 7 specialized crates
-- ✅ Persistent context system with automatic compaction
-- ✅ Environment awareness (processes, memory, disk, battery)
-- ✅ Memory compaction (history, tokens, facts, tasks)
-- ✅ Soul configuration system
-- ✅ Permission engine with blocked patterns
-- ✅ LLM provider abstraction (NVIDIA, Google, local models)
-- ✅ Tool trait system with validation
-- ✅ Interface abstraction for multiple UIs
-- ✅ Comprehensive test coverage
+- [DONE] Layered architecture with 7 specialized crates
+- [DONE] Persistent context system with automatic compaction
+- [DONE] Environment awareness (processes, memory, disk, battery)
+- [DONE] Memory compaction (history, tokens, facts, tasks)
+- [DONE] Soul configuration system
+- [DONE] Permission engine with blocked patterns
+- [DONE] LLM provider abstraction (NVIDIA, Google, local models)
+- [DONE] Tool trait system with validation
+- [DONE] Interface abstraction for multiple UIs
+- [DONE] Comprehensive test coverage
 
-### In Progress (Phase 4-6) ⏳
+### In Progress (Phase 4-6) [IN PROGRESS]
 
-- ⏳ Multi-step planning engine with explicit plan generation
-- ⏳ Structured tool categories (System, File, Hyprland, Wallpaper, Process)
-- ⏳ Soul system integration (migrate from ./data/agents/ to ./souls/)
+- [IN PROGRESS] Multi-step planning engine with explicit plan generation
+- [IN PROGRESS] Structured tool categories (System, File, Hyprland, Wallpaper, Process)
+- [IN PROGRESS] Soul system integration (migrate from ./data/agents/ to ./souls/)
 
 ### Next Up (Phase 7-9)
 
@@ -869,11 +869,11 @@ export SOULS_DIR="./souls"
 Task: "Monitor disk usage and clean up old logs"
 
 Plan:
-1. Check disk usage ✓
-2. Identify large log files ✓
-3. Archive logs older than 30 days ✓
-4. Compress archives ✓
-5. Verify disk space freed ✓
+1. Check disk usage [DONE]
+2. Identify large log files [DONE]
+3. Archive logs older than 30 days [DONE]
+4. Compress archives [DONE]
+5. Verify disk space freed [DONE]
 ```
 
 ### 2. Development Automation
@@ -884,12 +884,12 @@ Plan:
 Task: "Set up a new Rust project with CI/CD"
 
 Plan:
-1. Create project directory ✓
-2. Initialize Cargo project ✓
-3. Create GitHub Actions workflow ✓
-4. Add README and LICENSE ✓
-5. Initialize git repository ✓
-6. Create first commit ✓
+1. Create project directory [DONE]
+2. Initialize Cargo project [DONE]
+3. Create GitHub Actions workflow [DONE]
+4. Add README and LICENSE [DONE]
+5. Initialize git repository [DONE]
+6. Create first commit [DONE]
 ```
 
 ### 3. Research & Analysis
@@ -900,11 +900,11 @@ Plan:
 Task: "Analyze system performance over the last hour"
 
 Plan:
-1. Collect process statistics ✓
-2. Analyze memory usage patterns ✓
-3. Identify resource-intensive processes ✓
-4. Generate performance report ✓
-5. Provide optimization recommendations ✓
+1. Collect process statistics [DONE]
+2. Analyze memory usage patterns [DONE]
+3. Identify resource-intensive processes [DONE]
+4. Generate performance report [DONE]
+5. Provide optimization recommendations [DONE]
 ```
 
 ### 4. File Management
@@ -915,10 +915,10 @@ Plan:
 Task: "Organize files in the sandbox by type"
 
 Plan:
-1. List all files in sandbox ✓
-2. Create subdirectories (docs, images, code) ✓
-3. Move files to appropriate directories ✓
-4. Generate organization summary ✓
+1. List all files in sandbox [DONE]
+2. Create subdirectories (docs, images, code) [DONE]
+3. Move files to appropriate directories [DONE]
+4. Generate organization summary [DONE]
 ```
 
 ---
