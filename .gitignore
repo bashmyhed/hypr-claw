@@ -1,0 +1,27 @@
+## hypr_claw_tools
+# Rust
+hypr_claw_tools/target/
+hypr_claw_tools/Cargo.lock
+hypr_claw_tools/**/*.rs.bk
+hypr_claw_tools/*.pdb
+# Testing
+hypr_claw_tools/test_sandbox/
+hypr_claw_tools/test_sandbox_adv/
+hypr_claw_tools/test_sandbox_security/
+hypr_claw_tools/sandbox/
+
+*.swp
+*.swo
+
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+
+target/
+.env
+*.log
