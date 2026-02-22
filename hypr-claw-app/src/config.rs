@@ -14,6 +14,7 @@ pub struct Config {
 #[serde(rename_all = "lowercase")]
 pub enum LLMProvider {
     Nvidia,
+    Google,
     #[serde(rename = "local")]
     Local { base_url: String },
 }
@@ -22,12 +23,13 @@ impl LLMProvider {
     pub fn base_url(&self) -> String {
         match self {
             LLMProvider::Nvidia => "https://integrate.api.nvidia.com/v1".to_string(),
+            LLMProvider::Google => "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
             LLMProvider::Local { base_url } => base_url.clone(),
         }
     }
 
     pub fn requires_api_key(&self) -> bool {
-        matches!(self, LLMProvider::Nvidia)
+        matches!(self, LLMProvider::Nvidia | LLMProvider::Google)
     }
 }
 

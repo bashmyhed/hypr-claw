@@ -3,13 +3,15 @@ use anyhow::{Result, Context};
 use std::io::{self, Write};
 
 const NVIDIA_API_KEY_NAME: &str = "llm/nvidia_api_key";
+const GOOGLE_API_KEY_NAME: &str = "llm/google_api_key";
 
 pub fn run_bootstrap() -> Result<Config> {
     println!("\nNo LLM provider configured.");
     println!("Select provider:");
-    println!("1. NVIDIA Kimi (cloud)");
-    println!("2. Local model");
-    print!("\nChoice [1-2]: ");
+    println!("1. NVIDIA Kimi");
+    println!("2. Google Gemini");
+    println!("3. Local model");
+    print!("\nChoice [1-3]: ");
     io::stdout().flush()?;
 
     let mut choice = String::new();
@@ -18,9 +20,10 @@ pub fn run_bootstrap() -> Result<Config> {
 
     match choice {
         "1" => bootstrap_nvidia(),
-        "2" => bootstrap_local(),
+        "2" => bootstrap_google(),
+        "3" => bootstrap_local(),
         _ => {
-            anyhow::bail!("Invalid choice. Please select 1 or 2.");
+            anyhow::bail!("Invalid choice. Please select 1, 2, or 3.");
         }
     }
 }
@@ -50,6 +53,35 @@ fn bootstrap_nvidia() -> Result<Config> {
 
     config.save()?;
     println!("✅ NVIDIA provider configured");
+
+    Ok(config)
+}
+
+fn bootstrap_google() -> Result<Config> {
+    println!("\nEnter Google API key:");
+    let api_key = rpassword::read_password()
+        .context("Failed to read API key")?;
+
+    if api_key.trim().is_empty() {
+        anyhow::bail!("API key cannot be empty");
+    }
+
+    // Store encrypted credential
+    let master_key = get_or_create_master_key()?;
+    let cred_store = hypr_claw::infra::credential_store::CredentialStore::new(
+        "./data/credentials",
+        &master_key,
+    )?;
+    
+    cred_store.store_secret(GOOGLE_API_KEY_NAME, api_key.trim())?;
+
+    let config = Config {
+        provider: LLMProvider::Google,
+        model: "gemini-2.5-flash".to_string(),
+    };
+
+    config.save()?;
+    println!("✅ Google provider configured");
 
     Ok(config)
 }
@@ -88,6 +120,17 @@ pub fn get_nvidia_api_key() -> Result<String> {
         .context("NVIDIA API key not found. Run bootstrap again.")
 }
 
+pub fn get_google_api_key() -> Result<String> {
+    let master_key = get_or_create_master_key()?;
+    let cred_store = hypr_claw::infra::credential_store::CredentialStore::new(
+        "./data/credentials",
+        &master_key,
+    )?;
+    
+    cred_store.get_secret(GOOGLE_API_KEY_NAME)
+        .context("Google API key not found. Run bootstrap again.")
+}
+
 pub fn delete_nvidia_api_key() -> Result<()> {
     let master_key = get_or_create_master_key()?;
     let cred_store = hypr_claw::infra::credential_store::CredentialStore::new(
@@ -96,6 +139,17 @@ pub fn delete_nvidia_api_key() -> Result<()> {
     )?;
     
     cred_store.delete_secret(NVIDIA_API_KEY_NAME)?;
+    Ok(())
+}
+
+pub fn delete_google_api_key() -> Result<()> {
+    let master_key = get_or_create_master_key()?;
+    let cred_store = hypr_claw::infra::credential_store::CredentialStore::new(
+        "./data/credentials",
+        &master_key,
+    )?;
+    
+    cred_store.delete_secret(GOOGLE_API_KEY_NAME)?;
     Ok(())
 }
 

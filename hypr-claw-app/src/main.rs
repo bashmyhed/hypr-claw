@@ -57,6 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Display provider info
     let provider_name = match &config.provider {
         LLMProvider::Nvidia => "NVIDIA Kimi",
+        LLMProvider::Google => "Google Gemini",
         LLMProvider::Local { .. } => "Local",
     };
     println!("Using provider: {}", provider_name);
@@ -181,6 +182,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 config.model.clone(),
             )
         }
+        LLMProvider::Google => {
+            let api_key = match bootstrap::get_google_api_key() {
+                Ok(key) => key,
+                Err(e) => {
+                    eprintln!("❌ Failed to retrieve Google API key: {}", e);
+                    eprintln!("💡 Tip: Run 'hypr-claw config reset' to reconfigure");
+                    return Err(e.into());
+                }
+            };
+            hypr_claw_runtime::LLMClient::with_api_key_and_model(
+                config.provider.base_url(),
+                1,
+                api_key,
+                config.model.clone(),
+            )
+        }
         LLMProvider::Local { .. } => {
             hypr_claw_runtime::LLMClient::new(config.provider.base_url(), 1)
         }
@@ -271,7 +288,14 @@ fn handle_config_reset() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = bootstrap::delete_nvidia_api_key() {
         // Ignore if key doesn't exist
         if !e.to_string().contains("not found") {
-            eprintln!("⚠️  Warning: Failed to delete API key: {}", e);
+            eprintln!("⚠️  Warning: Failed to delete NVIDIA API key: {}", e);
+        }
+    }
+    
+    if let Err(e) = bootstrap::delete_google_api_key() {
+        // Ignore if key doesn't exist
+        if !e.to_string().contains("not found") {
+            eprintln!("⚠️  Warning: Failed to delete Google API key: {}", e);
         }
     }
     

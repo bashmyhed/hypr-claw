@@ -21,6 +21,26 @@ model: moonshotai/kimi-k2.5
 }
 
 #[test]
+fn test_config_google_provider() {
+    let config_yaml = r#"
+provider: google
+model: gemini-2.5-pro
+"#;
+
+    let config: hypr_claw_app::config::Config = serde_yaml::from_str(config_yaml).unwrap();
+    
+    match config.provider {
+        hypr_claw_app::config::LLMProvider::Google => {
+            assert_eq!(config.provider.base_url(), "https://generativelanguage.googleapis.com/v1beta/openai");
+            assert!(config.provider.requires_api_key());
+        }
+        _ => panic!("Expected Google provider"),
+    }
+    
+    assert_eq!(config.model, "gemini-2.5-pro");
+}
+
+#[test]
 fn test_config_local_provider() {
     let config_yaml = r#"
 provider: !local

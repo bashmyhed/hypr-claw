@@ -2,7 +2,7 @@
 
 use crate::interfaces::RuntimeError;
 use crate::types::{LLMResponse, Message};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,13 +17,41 @@ struct LLMRequest {
     tools: Vec<String>,
 }
 
-/// OpenAI-compatible request format for NVIDIA
+/// OpenAI-compatible request format for NVIDIA/Google
 #[derive(Debug, Serialize)]
 struct OpenAIRequest {
     model: String,
     messages: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+}
+
+/// OpenAI-compatible response format
+#[derive(Debug, Deserialize)]
+struct OpenAIResponse {
+    choices: Vec<OpenAIChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIChoice {
+    message: OpenAIMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIMessage {
+    content: Option<String>,
+    tool_calls: Option<Vec<OpenAIToolCall>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIToolCall {
+    function: OpenAIFunction,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIFunction {
+    name: String,
+    arguments: String,
 }
 
 /// Circuit breaker state.
@@ -190,7 +218,7 @@ impl LLMClient {
         
         let mut req_builder = self.client.post(&url);
 
-        // Use OpenAI format if model is specified (NVIDIA), otherwise use custom format
+        // Use OpenAI format if model is specified (NVIDIA/Google), otherwise use custom format
         if let Some(model) = &self.model {
             // Convert to OpenAI format
             let mut openai_messages = Vec::new();
@@ -213,7 +241,7 @@ impl LLMClient {
                 };
                 openai_messages.push(serde_json::json!({
                     "role": role_str,
-                    "content": msg.content.to_string()
+                    "content": &msg.content
                 }));
             }
             
@@ -260,38 +288,76 @@ impl LLMClient {
         
         let status = response.status();
         if !status.is_success() {
+            // Try to get error details from response body
+            let error_body = response.text().await.unwrap_or_else(|_| "Unable to read error response".to_string());
+            
             let error_msg = match status.as_u16() {
                 401 => {
                     if self.api_key.is_some() {
-                        "Authentication failed. Check NVIDIA API key.".to_string()
+                        format!("Authentication failed. Check your API key. Details: {}", error_body)
                     } else {
-                        "Authentication required (401 Unauthorized)".to_string()
+                        format!("Authentication required (401 Unauthorized). Details: {}", error_body)
                     }
                 }
-                404 => "Invalid endpoint (404 Not Found). Check LLM client configuration.".to_string(),
+                404 => format!("Invalid endpoint (404 Not Found). Details: {}", error_body),
                 429 => {
                     if self.api_key.is_some() {
-                        "Rate limited by NVIDIA API.".to_string()
+                        format!("Rate limit exceeded. Details: {}", error_body)
                     } else {
-                        "Rate limit exceeded (429 Too Many Requests)".to_string()
+                        format!("Rate limit exceeded (429 Too Many Requests). Details: {}", error_body)
                     }
                 }
                 500..=599 => {
                     if self.api_key.is_some() {
-                        "NVIDIA API service error.".to_string()
+                        format!("LLM service error. Details: {}", error_body)
                     } else {
-                        format!("Server error: {}", status)
+                        format!("Server error: {}. Details: {}", status, error_body)
                     }
                 }
-                _ => format!("HTTP error: {}", status),
+                _ => format!("HTTP error: {}. Details: {}", status, error_body),
             };
             return Err(RuntimeError::LLMError(error_msg));
         }
         
-        let llm_response: LLMResponse = response
-            .json()
-            .await
-            .map_err(|e| RuntimeError::LLMError(format!("Failed to parse response: {}", e)))?;
+        let llm_response: LLMResponse = if self.model.is_some() {
+            // Parse OpenAI format response
+            let openai_response: OpenAIResponse = response
+                .json()
+                .await
+                .map_err(|e| RuntimeError::LLMError(format!("Failed to parse response: {}", e)))?;
+            
+            // Convert to our format
+            if let Some(choice) = openai_response.choices.first() {
+                if let Some(tool_calls) = &choice.message.tool_calls {
+                    if let Some(tool_call) = tool_calls.first() {
+                        LLMResponse::ToolCall {
+                            schema_version: crate::types::SCHEMA_VERSION,
+                            tool_name: tool_call.function.name.clone(),
+                            input: serde_json::from_str(&tool_call.function.arguments)
+                                .unwrap_or(serde_json::json!({})),
+                        }
+                    } else {
+                        LLMResponse::Final {
+                            schema_version: crate::types::SCHEMA_VERSION,
+                            content: choice.message.content.clone().unwrap_or_default(),
+                        }
+                    }
+                } else {
+                    LLMResponse::Final {
+                        schema_version: crate::types::SCHEMA_VERSION,
+                        content: choice.message.content.clone().unwrap_or_default(),
+                    }
+                }
+            } else {
+                return Err(RuntimeError::LLMError("No choices in response".to_string()));
+            }
+        } else {
+            // Parse custom format response
+            response
+                .json()
+                .await
+                .map_err(|e| RuntimeError::LLMError(format!("Failed to parse response: {}", e)))?
+        };
         
         self.validate_response(&llm_response)?;
         

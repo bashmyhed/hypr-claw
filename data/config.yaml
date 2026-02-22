@@ -1,2 +1,2 @@
-provider: nvidia
-model: moonshotai/kimi-k2.5
+provider: google
+model: gemini-2.5-flash
