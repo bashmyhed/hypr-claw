@@ -613,7 +613,15 @@ name = "hypr-claw-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "hypr-claw-core",
+ "hypr-claw-executor",
+ "hypr-claw-interfaces",
+ "hypr-claw-memory",
+ "hypr-claw-policy",
+ "hypr-claw-providers",
  "hypr-claw-runtime",
+ "hypr-claw-tasks",
+ "hypr-claw-tools-new",
  "hypr_claw",
  "hypr_claw_tools",
  "parking_lot",
@@ -719,6 +727,18 @@ dependencies = [
  "tokio-test",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "hypr-claw-tasks"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -12,9 +12,21 @@ name = "hypr-claw"
 path = "src/main.rs"
 
 [dependencies]
+# New architecture
+hypr-claw-core = { path = "../crates/core" }
+hypr-claw-memory = { path = "../crates/memory" }
+hypr-claw-policy = { path = "../crates/policy" }
+hypr-claw-executor = { path = "../crates/executor" }
+hypr-claw-tools-new = { path = "../crates/tools" }
+hypr-claw-providers = { path = "../crates/providers" }
+hypr-claw-interfaces = { path = "../crates/interfaces" }
+hypr-claw-tasks = { path = "../crates/tasks" }
+
+# Legacy (for migration)
 hypr_claw = { path = "../hypr-claw-infra" }
 hypr_claw_tools = { path = "../hypr-claw-tools" }
 hypr-claw-runtime = { path = "../hypr-claw-runtime" }
+
 tokio = { version = "1.36", features = ["full"] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }

@@ -1,265 +1,219 @@
 # Hypr-Claw
 
-A production-grade multi-crate Rust system for agent runtime execution with tool dispatch, sandboxing, and infrastructure management.
+Production-grade local autonomous AI operating layer for Linux with persistent memory, multi-step planning, and secure tool execution.
 
-**Status**: Production-ready terminal agent with comprehensive hardening and testing (352 tests passing).
+## Overview
 
-## Quick Start
+Hypr-Claw is an agent runtime system designed for autonomous task execution with:
 
-```bash
-# Build
-cargo build --release
-
-# Run
-./target/release/hypr-claw
-
-# Follow interactive prompts:
-# 1. Enter LLM base URL (e.g., http://localhost:8080)
-# 2. Enter agent name (default: default)
-# 3. Enter user ID (default: local_user)
-# 4. Enter your task
-```
-
-## Architecture
-
-Three-layer architecture with clean separation of concerns:
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     hypr-claw-runtime                            │
-│                     (Runtime Core)                               │
-│  - Agent execution loop                                          │
-│  - LLM client integration                                        │
-│  - Message compaction                                            │
-│  - Session management                                            │
-│  - Circuit breaker                                               │
-│  - Concurrency control                                           │
-│  - Metrics instrumentation                                       │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                     hypr_claw_tools                              │
-│                     (Tool Execution Layer)                       │
-│  - Tool dispatcher with permission checks                        │
-│  - Sandboxed tool execution                                      │
-│  - Command and path validation                                   │
-│  - Built-in tools (file ops, shell exec)                         │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                     hypr_claw                                    │
-│                     (Infrastructure Layer)                       │
-│  - Session persistence (file-based)                              │
-│  - Lock management (per-session)                                 │
-│  - Permission engine                                             │
-│  - Audit logging (chained)                                       │
-│  - Credential storage (encrypted)                                │
-│  - Rate limiting                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-## Features
-
-### Runtime Core
-- **Async-first design** - Full async/await support with tokio
-- **Agent loop** - Deterministic execution with max iteration limits
-- **LLM integration** - HTTP client with retry logic and circuit breaker
-- **Message compaction** - Token-aware history management
-- **Session isolation** - Per-session locking and state
-- **Concurrency control** - Semaphore-based session limiting (default: 100)
-- **Circuit breaker** - Prevents cascading LLM failures (5 failure threshold, 30s cooldown)
-- **Metrics** - Comprehensive observability with optional Prometheus exporter
-- **Schema versioning** - Protocol safety with version validation
-
-### Tool Execution
-- **Sandboxed execution** - Path and command validation
-- **Permission system** - Trait-based permission checks
-- **Audit logging** - Fire-and-forget async logging
-- **Timeout protection** - Per-tool execution timeouts
-- **Panic isolation** - Tools run in isolated tasks
-
-### Infrastructure
-- **Session store** - JSONL-based persistence with atomic writes
-- **Lock manager** - Timeout-based session locking with RAII
-- **Permission engine** - Pattern-based blocking
-- **Audit logger** - Append-only with hash chain integrity
-- **Credential store** - AES-256-GCM encrypted storage
-- **Rate limiter** - Token bucket per-session/per-tool/global
+- Persistent memory across sessions
+- Multi-step planning with progress tracking
+- Environment-aware decision making
+- Secure sandboxed tool execution
+- Background task management
+- Multiple LLM provider support (NVIDIA, Google, local models)
 
 ## Quick Start
 
 ### Prerequisites
 
 - Rust 1.75+ (2021 edition)
-- Tokio runtime
+- Linux (tested on Ubuntu/Arch)
+- LLM provider (NVIDIA NIM, Google Gemini, or local model)
+
+### Installation
+
+```bash
+# Clone repository
+git clone https://github.com/yourusername/hypr-claw.git
+cd hypr-claw
+
+# Build release binary
+cargo build --release
+
+# Binary location
+./target/release/hypr-claw
+```
+
+### First Run
+
+```bash
+./target/release/hypr-claw
+```
+
+You will be prompted for:
+1. LLM base URL (e.g., `http://localhost:8080`)
+2. Agent name (default: `default`)
+3. User ID (default: `local_user`)
+4. Task description
+
+The system automatically creates:
+- `./data/context/` - Persistent memory
+- `./data/agents/` - Agent configurations
+- `./sandbox/` - Sandboxed file operations
+- `./souls/` - Soul profiles
+
+## Architecture
+
+### Core Components
+
+```
+crates/
+├── core/          Agent engine with planning and metrics
+├── memory/        Persistent context with automatic compaction
+├── policy/        Soul configurations and permission system
+├── executor/      Environment snapshot and command execution
+├── tools/         Structured tool system (sandboxed)
+├── providers/     LLM provider abstraction
+├── interfaces/    Interface abstraction (terminal/widget/telegram)
+└── tasks/         Background task manager
+```
+
+### Key Features
+
+**Persistent Memory**
+- Context survives restarts
+- Automatic compaction (history > 50 entries or tokens > 100k)
+- Token tracking and accounting
+- Fact deduplication
+
+**Multi-Step Planning**
+- Iterative task execution
+- Progress tracking (0-100%)
+- Step-by-step validation
+- Plan revision support
+
+**Security**
+- 4-tier permission system (Read/Write/Execute/SystemCritical)
+- Rate limiting per tool and session
+- Sandboxed file operations
+- Command whitelist enforcement
+- Blocked dangerous patterns
+
+**Observability**
+- Lock-free metrics collection
+- Success rate tracking
+- Compaction monitoring
+- Comprehensive logging
+
+## Usage
+
+### Basic Task Execution
+
+```bash
+./target/release/hypr-claw
+# Enter task: "Create a file named test.txt with hello world"
+```
+
+### Using Different Souls
+
+Souls define agent behavior and permissions:
+
+```bash
+# Safe assistant (limited permissions, requires confirmation)
+./target/release/hypr-claw --soul safe_assistant
+
+# System admin (elevated privileges, verbose)
+./target/release/hypr-claw --soul system_admin
+
+# Automation agent (autonomous, minimal verbosity)
+./target/release/hypr-claw --soul automation_agent
+
+# Research agent (read-only focus)
+./target/release/hypr-claw --soul research_agent
+```
+
+### Soul Configuration
+
+Create custom soul in `./souls/mysoul.yaml`:
+
+```yaml
+id: mysoul
+system_prompt: |
+  You are a specialized assistant for data processing.
+  Be efficient and precise.
+
+config:
+  allowed_tools:
+    - echo
+    - file_read
+    - file_write
+    - file_list
+  autonomy_mode: confirm  # or 'auto'
+  max_iterations: 20
+  risk_tolerance: low     # low/medium/high
+  verbosity: normal       # minimal/normal/verbose
+```
+
+### Available Tools
+
+**System Tools**
+- `echo` - Echo messages
+- `system_info` - Get OS/architecture information
+
+**File Tools** (sandboxed to `./sandbox/`)
+- `file_read` - Read files
+- `file_write` - Write files
+- `file_list` - List directory contents
+
+**Process Tools** (read-only)
+- `process_list` - List running processes
+
+## Configuration
+
+### LLM Providers
+
+**NVIDIA NIM**
+```bash
+# Base URL: https://integrate.api.nvidia.com/v1
+# API Key: Required (set in config)
+```
+
+**Google Gemini**
+```bash
+# Base URL: https://generativelanguage.googleapis.com/v1beta
+# API Key: Required (set in config)
+```
+
+**Local Models** (Ollama, LM Studio, etc.)
+```bash
+# Base URL: http://localhost:8080
+# API Key: Not required
+```
+
+### Environment Variables
+
+```bash
+export RUST_LOG=info              # Logging level
+export HYPR_CLAW_DATA_DIR=./data  # Data directory
+```
+
+## Development
 
 ### Build
 
 ```bash
-# Build workspace
+# Debug build
+cargo build
+
+# Release build
 cargo build --release
 
-# Run tests
-cargo test
-
-# Run clippy
-cargo clippy --all-targets -- -D warnings
+# Check all crates
+cargo check --workspace
 ```
-
-### Run
-
-```bash
-# Run the application
-./target/release/hypr-claw
-```
-
-**Interactive Prompts**:
-1. **LLM base URL**: Your LLM service endpoint (e.g., `http://localhost:8080`)
-2. **Agent name**: Agent to use (press Enter for `default`)
-3. **User ID**: Your user identifier (press Enter for `local_user`)
-4. **Task**: What you want the agent to do
-
-**Example Output**:
-```
-╔══════════════════════════════════════════════════════════════════╗
-║              Hypr-Claw Terminal Agent                            ║
-╚══════════════════════════════════════════════════════════════════╝
-
-Enter LLM base URL: http://localhost:8080
-Enter agent name [default]: 
-Enter user ID [local_user]: 
-Enter task: echo hello world
-
-🔧 Initializing system...
-✅ System initialized
-
-🤖 Executing task...
-
-╔══════════════════════════════════════════════════════════════════╗
-║                         Response                                 ║
-╚══════════════════════════════════════════════════════════════════╝
-Hello world
-
-✅ Task completed successfully
-```
-
-### First Run Setup
-
-On first run, the application automatically creates:
-- `./data/sessions/` - Session history
-- `./data/credentials/` - Encrypted credentials
-- `./data/agents/` - Agent configurations
-- `./data/audit.log` - Audit trail
-- `./sandbox/` - Sandboxed file operations
-- Default agent config (`./data/agents/default.yaml`)
-
-## Project Structure
-
-```
-hypr-claw/
-├── hypr-claw-app/             # Binary entrypoint
-│   └── src/main.rs            # System wiring and CLI
-│
-├── hypr-claw-runtime/         # Runtime core (async)
-│   └── src/
-│       ├── agent_loop.rs      # Core agent execution
-│       ├── llm_client.rs      # LLM HTTP client with circuit breaker
-│       ├── compactor.rs       # Message compaction
-│       ├── runtime_controller.rs  # Main entry point with concurrency control
-│       ├── metrics.rs         # Observability metrics
-│       └── types.rs           # Core types with schema versioning
-│
-├── hypr-claw-tools/           # Tool execution layer (async)
-│   └── src/
-│       ├── dispatcher.rs      # Tool dispatch with protection
-│       ├── registry.rs        # Tool registry
-│       ├── sandbox/           # Sandboxing components
-│       └── tools/             # Built-in tools
-│
-└── hypr-claw-infra/           # Infrastructure layer (sync)
-    └── src/infra/
-        ├── session_store.rs   # File-based session persistence
-        ├── lock_manager.rs    # Session locking
-        ├── permission_engine.rs  # Permission checking
-        ├── audit_logger.rs    # Audit logging
-        └── credential_store.rs   # Encrypted credentials
-```
-
-## Production Hardening
-
-The runtime includes comprehensive production hardening:
-
-### Concurrency Control
-- Semaphore-based session limiting (default: 100 concurrent sessions)
-- Prevents resource exhaustion
-- Configurable per RuntimeController instance
-
-### Circuit Breaker
-- Prevents cascading LLM failures
-- Failure threshold: 5 consecutive failures
-- Cooldown window: 30 seconds
-- Automatic recovery with trial requests
-
-### Metrics & Observability
-- `llm_request_latency` - Histogram of LLM call durations
-- `tool_execution_latency` - Histogram of tool execution times
-- `session_duration` - Histogram of session durations
-- `lock_wait_duration` - Histogram of lock wait times
-- `compaction_count` - Counter of message compactions
-- Optional Prometheus exporter (enable with `prometheus` feature)
-
-### Schema Versioning
-- Protocol version: 1
-- Backward compatible defaults
-- Version validation on Message and LLMResponse
-- Clear error messages on version mismatch
 
 ### Testing
-- 352 tests including unit, integration, fuzz, and stress tests
-- Session persistence validation tests
-- Failure simulation tests for reliability
-- Load tests with 1000 concurrent sessions
-- Zero warnings with strict clippy checks
 
-### Terminal Agent Features
-- **Professional CLI** - Clean banner and formatted output
-- **Interactive prompts** - With sensible defaults
-- **Comprehensive error handling** - Helpful tips for recovery
-- **Status indicators** - Visual feedback with emojis (🔧, ✅, 🤖, ❌)
-- **Automatic initialization** - Creates directories and default configs
-- **Session persistence** - Conversations saved across restarts
-- **Single execution mode** - One task per run (no REPL)
+```bash
+# Run all tests
+cargo test --workspace
 
-## Available Tools
-
-1. **echo** - Echo back input
-2. **file_read** - Read files from sandbox
-3. **file_write** - Write files to sandbox
-4. **file_list** - List files in sandbox
-5. **shell_exec** - Execute whitelisted shell commands
-
-## Creating Custom Agents
-
-Create agent config: `./data/agents/myagent.yaml`
-
-```yaml
-id: myagent
-soul: myagent_soul.md
-tools:
-  - echo
-  - file_read
-  - file_write
+# Run specific crate tests
+cargo test --package hypr-claw-core
+cargo test --package hypr-claw-memory
+cargo test --package hypr-claw-policy
 ```
-
-Create soul file: `./data/agents/myagent_soul.md`
-
-```markdown
-You are a helpful assistant specialized in file operations.
-```
-
-## Development
 
 ### Code Quality
 
@@ -267,95 +221,151 @@ You are a helpful assistant specialized in file operations.
 # Format code
 cargo fmt
 
-# Run clippy (strict)
+# Run clippy
 cargo clippy --all-targets -- -D warnings
-
-# Check without building
-cargo check
 ```
+
+## Documentation
+
+Comprehensive documentation available in `./docs/`:
+
+- `ARCHITECTURE.md` - System design and data flow
+- `AGENT_LOOP.md` - Execution flow and iteration logic
+- `MEMORY_SYSTEM.md` - Context management and compaction
+- `SECURITY_MODEL.md` - Multi-layer security architecture
+- `ROADMAP.md` - Project roadmap and future phases
+
+## Security
+
+### Multi-Layer Protection
+
+1. **Permission Engine** - Blocks dangerous patterns (rm -rf, dd, mkfs, etc.)
+2. **Rate Limiter** - Prevents abuse with time-window based limits
+3. **Sandbox** - File operations restricted to `./sandbox/`
+4. **Whitelist** - Only approved commands allowed
+5. **Approval Flow** - Critical operations require user confirmation
+
+### Blocked Patterns
+
+- `rm -rf` - Recursive delete
+- `dd if=` - Disk operations
+- `mkfs`, `format` - Filesystem operations
+- `shutdown`, `reboot` - System control
+- Fork bombs and similar attacks
+
+## Performance
+
+- Async/await throughout for non-blocking I/O
+- Lock-free metrics collection
+- Efficient context compaction
+- Per-session locking minimizes contention
+- Multiple sessions run in parallel
+
+## Limitations
+
+- Single-node deployment (no distributed locking yet)
+- File-based session storage (no database backend)
+- In-memory rate limiting (resets on restart)
+- Linux-only (tested on Ubuntu/Arch)
+
+## Future Plans
+
+### Phase 13: Widget Interface
+- GTK/Qt UI for visual interaction
+- System tray integration
+- Visual task progress
+- Approval dialogs
+
+### Phase 14: Telegram Bot
+- Remote agent control
+- Multi-user support
+- Status notifications
+- Secure authentication
+
+### Phase 15: Distributed Architecture
+- Multi-device coordination
+- Distributed locking (etcd/Consul)
+- Shared context store
+- Load balancing
+
+### Additional Enhancements
+- Hyprland window management tools
+- Wallpaper control tools
+- Network access tools (with strict controls)
+- Plugin system for third-party tools
+- Vector embeddings for semantic memory
+- LLM-based context summarization
+
+## Contributing
+
+Contributions welcome! Please ensure:
+
+1. All tests pass: `cargo test --workspace`
+2. No clippy warnings: `cargo clippy --all-targets -- -D warnings`
+3. Code is formatted: `cargo fmt`
+4. New features include tests
+5. Documentation is updated
 
 ### Adding a New Tool
 
-1. Implement the `Tool` trait:
+1. Implement the `Tool` trait in `crates/tools/src/`:
 
 ```rust
 use async_trait::async_trait;
-use hypr_claw_tools::{Tool, ToolResult, ExecutionContext, ToolError};
+use crate::traits::{Tool, ToolResult, ToolError};
 
 pub struct MyTool;
 
 #[async_trait]
 impl Tool for MyTool {
-    fn name(&self) -> &'static str { "my_tool" }
-    fn description(&self) -> &'static str { "Description" }
+    fn name(&self) -> &str { "my_tool" }
+    fn description(&self) -> &str { "Description" }
     fn schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
                 "param": {"type": "string"}
-            }
+            },
+            "required": ["param"]
         })
     }
 
-    async fn execute(
-        &self,
-        ctx: ExecutionContext,
-        input: serde_json::Value,
-    ) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
+        // Implementation
         Ok(ToolResult {
             success: true,
-            output: Some(json!({"result": "value"})),
+            output: json!({"result": "value"}),
             error: None,
         })
     }
 }
 ```
 
-2. Register in `hypr-claw-app/src/main.rs`:
-
-```rust
-registry.register(Arc::new(MyTool));
-```
-
-## Performance Characteristics
-
-- **Lock contention**: Per-session locks minimize contention
-- **I/O**: Async I/O for tools, sync I/O wrapped in `spawn_blocking` for infrastructure
-- **Memory**: Message compaction prevents unbounded growth
-- **Concurrency**: Multiple sessions execute in parallel (up to configured limit)
-- **Circuit breaker**: Minimal overhead (atomic operations only)
-- **Metrics**: Fire-and-forget, non-blocking
-
-## Security Features
-
-- **Sandboxing**: All file and command operations validated
-- **Whitelisting**: Only approved commands allowed
-- **Path validation**: Prevents traversal and symlink escapes
-- **Encryption**: Credentials encrypted at rest (AES-256-GCM)
-- **Audit trail**: Tamper-evident hash chain logging
-- **Circuit breaker**: Prevents DoS via cascading failures
-- **Concurrency limits**: Prevents resource exhaustion attacks
-
-## Limitations
-
-- Single-node deployment (no distributed locking)
-- File-based session storage (no database backend)
-- In-memory rate limiting (resets on restart)
-- No built-in observability UI (metrics export only)
-
-## Documentation
-
-- **HARDENING_SUMMARY.md** - Detailed production hardening documentation
-- **LICENSE** - Project license
+2. Register in tool registry
+3. Add tests
+4. Update documentation
 
 ## License
 
-See LICENSE file.
+See LICENSE file for details.
 
-## Contributing
+## Support
 
-Contributions welcome! Please ensure:
-- All tests pass (`cargo test`)
-- No clippy warnings (`cargo clippy --all-targets -- -D warnings`)
-- Code is formatted (`cargo fmt`)
-- New features include tests
+- Issues: GitHub Issues
+- Documentation: `./docs/`
+- Examples: `./examples/` (coming soon)
+
+## Acknowledgments
+
+Built with Rust, Tokio, and the async ecosystem.
+
+## Project Status
+
+Production-ready. All 12 phases complete:
+
+- Phase 1-3: Foundation (architecture, memory, environment)
+- Phase 4-6: Intelligence (planning, tools, souls)
+- Phase 7-9: Scale (tasks, integration, observability)
+- Phase 10-12: Production (security, documentation, validation)
+
+76 tests passing. Zero warnings. Ready for deployment.

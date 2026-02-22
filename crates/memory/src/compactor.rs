@@ -7,14 +7,21 @@ const SUMMARY_THRESHOLD: usize = 30;
 pub struct ContextCompactor;
 
 impl ContextCompactor {
-    pub fn compact(context: &mut ContextData) {
-        Self::compact_history(context);
+    pub fn compact(context: &mut ContextData) -> bool {
+        let mut compacted = false;
+        
+        if Self::compact_history(context) {
+            compacted = true;
+        }
         Self::deduplicate_facts(context);
         Self::prune_completed_tasks(context);
+        
+        compacted
     }
 
-    fn compact_history(context: &mut ContextData) {
+    fn compact_history(context: &mut ContextData) -> bool {
         let history = &mut context.recent_history;
+        let mut compacted = false;
 
         // If history is too long, summarize older entries
         if history.len() > MAX_RECENT_HISTORY {
@@ -30,6 +37,7 @@ impl ContextCompactor {
             };
 
             tracing::info!("Compacted {} history entries", to_summarize);
+            compacted = true;
         }
 
         // Token-based compaction
@@ -50,7 +58,10 @@ impl ContextCompactor {
             };
 
             tracing::info!("Token-based compaction: removed {} entries", target);
+            compacted = true;
         }
+        
+        compacted
     }
 
     fn summarize_entries(entries: &[HistoryEntry]) -> String {
@@ -119,8 +130,9 @@ mod tests {
             });
         }
 
-        ContextCompactor::compact(&mut context);
+        let compacted = ContextCompactor::compact(&mut context);
 
+        assert!(compacted);
         assert!(context.recent_history.len() <= MAX_RECENT_HISTORY);
         assert!(!context.long_term_summary.is_empty());
     }
