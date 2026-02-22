@@ -65,10 +65,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get user input
     print!("Enter agent name [default]: ");
     io::stdout().flush()?;
-    let mut agent_name = String::new();
-    io::stdin().read_line(&mut agent_name)?;
-    let agent_name = agent_name.trim();
-    let agent_name = if agent_name.is_empty() { "default" } else { agent_name };
+    let mut agent_name_input = String::new();
+    io::stdin().read_line(&mut agent_name_input)?;
+    let agent_name_input = agent_name_input.trim();
+    let agent_name = if agent_name_input.is_empty() { 
+        "default" 
+    } else { 
+        // Check if agent exists, fallback to default if not
+        let agent_path = format!("./data/agents/{}.yaml", agent_name_input);
+        if std::path::Path::new(&agent_path).exists() {
+            agent_name_input
+        } else {
+            eprintln!("⚠️  Agent '{}' not found, using 'default' agent", agent_name_input);
+            "default"
+        }
+    };
 
     print!("Enter user ID [local_user]: ");
     io::stdout().flush()?;
@@ -163,10 +174,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return Err(e.into());
                 }
             };
-            hypr_claw_runtime::LLMClient::with_api_key(
+            hypr_claw_runtime::LLMClient::with_api_key_and_model(
                 config.provider.base_url(),
                 1,
                 api_key,
+                config.model.clone(),
             )
         }
         LLMProvider::Local { .. } => {
@@ -212,10 +224,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match &e {
                 hypr_claw_runtime::RuntimeError::LLMError(msg) => {
                     eprintln!("❌ LLM Error: {}", msg);
-                    if msg.contains("401") {
-                        eprintln!("\n💡 Tip: Your API key may be invalid. Run 'hypr-claw config reset' to reconfigure");
-                    } else if msg.contains("429") {
-                        eprintln!("\n💡 Tip: Rate limit exceeded. Wait a moment and try again");
+                    if msg.contains("Authentication failed") || msg.contains("401") {
+                        eprintln!("\n💡 Tip: Run 'hypr-claw config reset' to reconfigure your API key");
+                    } else if msg.contains("Rate limited") || msg.contains("429") {
+                        eprintln!("\n💡 Tip: Wait a moment and try again");
+                    } else if msg.contains("404") || msg.contains("Invalid endpoint") {
+                        eprintln!("\n💡 Tip: Endpoint configuration error. Run 'hypr-claw config reset' to reconfigure");
+                    } else if msg.contains("service error") || msg.contains("5") {
+                        eprintln!("\n💡 Tip: The LLM service is experiencing issues. Try again later");
+                    } else if msg.contains("Network connection failed") {
+                        eprintln!("\n💡 Tip: Check your internet connection");
                     } else {
                         eprintln!("\n💡 Tip: Check that your LLM service is running and accessible");
                     }

@@ -17,6 +17,15 @@ struct LLMRequest {
     tools: Vec<String>,
 }
 
+/// OpenAI-compatible request format for NVIDIA
+#[derive(Debug, Serialize)]
+struct OpenAIRequest {
+    model: String,
+    messages: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+}
+
 /// Circuit breaker state.
 struct CircuitBreaker {
     consecutive_failures: AtomicUsize,
@@ -79,6 +88,7 @@ pub struct LLMClient {
     max_retries: u32,
     circuit_breaker: Arc<CircuitBreaker>,
     api_key: Option<String>,
+    model: Option<String>,
 }
 
 impl LLMClient {
@@ -99,6 +109,7 @@ impl LLMClient {
             max_retries,
             circuit_breaker: Arc::new(CircuitBreaker::new(5, Duration::from_secs(30))),
             api_key: None,
+            model: None,
         }
     }
 
@@ -106,6 +117,14 @@ impl LLMClient {
     pub fn with_api_key(base_url: String, max_retries: u32, api_key: String) -> Self {
         let mut client = Self::new(base_url, max_retries);
         client.api_key = Some(api_key);
+        client
+    }
+
+    /// Create a new LLM client with API key and model.
+    pub fn with_api_key_and_model(base_url: String, max_retries: u32, api_key: String, model: String) -> Self {
+        let mut client = Self::new(base_url, max_retries);
+        client.api_key = Some(api_key);
+        client.model = Some(model);
         client
     }
 
@@ -167,16 +186,61 @@ impl LLMClient {
         messages: &[Message],
         tools: &[String],
     ) -> Result<LLMResponse, RuntimeError> {
-        let request = LLMRequest {
-            system_prompt: system_prompt.to_string(),
-            messages: messages.to_vec(),
-            tools: tools.to_vec(),
-        };
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         
-        let mut req_builder = self
-            .client
-            .post(format!("{}/chat/completions", self.base_url))
-            .json(&request);
+        let mut req_builder = self.client.post(&url);
+
+        // Use OpenAI format if model is specified (NVIDIA), otherwise use custom format
+        if let Some(model) = &self.model {
+            // Convert to OpenAI format
+            let mut openai_messages = Vec::new();
+            
+            // Add system message if present
+            if !system_prompt.is_empty() {
+                openai_messages.push(serde_json::json!({
+                    "role": "system",
+                    "content": system_prompt
+                }));
+            }
+            
+            // Add conversation messages
+            for msg in messages {
+                let role_str = match msg.role {
+                    crate::types::Role::User => "user",
+                    crate::types::Role::Assistant => "assistant",
+                    crate::types::Role::Tool => "tool",
+                    crate::types::Role::System => "system",
+                };
+                openai_messages.push(serde_json::json!({
+                    "role": role_str,
+                    "content": msg.content.to_string()
+                }));
+            }
+            
+            let openai_request = OpenAIRequest {
+                model: model.clone(),
+                messages: openai_messages,
+                max_tokens: Some(2048),
+            };
+            
+            println!("DEBUG: FINAL_URL = {}", url);
+            println!("DEBUG: Has API key = {}", self.api_key.is_some());
+            println!("DEBUG: Request body = {}", serde_json::to_string_pretty(&openai_request).unwrap_or_default());
+            
+            req_builder = req_builder.json(&openai_request);
+        } else {
+            // Use custom format for local/Python service
+            let request = LLMRequest {
+                system_prompt: system_prompt.to_string(),
+                messages: messages.to_vec(),
+                tools: tools.to_vec(),
+            };
+            
+            println!("DEBUG: FINAL_URL = {}", url);
+            println!("DEBUG: Request body = {}", serde_json::to_string_pretty(&request).unwrap_or_default());
+            
+            req_builder = req_builder.json(&request);
+        }
 
         // Add Authorization header if API key is present
         if let Some(api_key) = &self.api_key {
@@ -186,13 +250,39 @@ impl LLMClient {
         let response = req_builder
             .send()
             .await
-            .map_err(|e| RuntimeError::LLMError(format!("HTTP request failed: {}", e)))?;
+            .map_err(|e| {
+                if e.is_connect() || e.is_timeout() {
+                    RuntimeError::LLMError("Network connection failed".to_string())
+                } else {
+                    RuntimeError::LLMError(format!("HTTP request failed: {}", e))
+                }
+            })?;
         
         let status = response.status();
         if !status.is_success() {
             let error_msg = match status.as_u16() {
-                401 => "Invalid API key (401 Unauthorized)".to_string(),
-                429 => "Rate limit exceeded (429 Too Many Requests)".to_string(),
+                401 => {
+                    if self.api_key.is_some() {
+                        "Authentication failed. Check NVIDIA API key.".to_string()
+                    } else {
+                        "Authentication required (401 Unauthorized)".to_string()
+                    }
+                }
+                404 => "Invalid endpoint (404 Not Found). Check LLM client configuration.".to_string(),
+                429 => {
+                    if self.api_key.is_some() {
+                        "Rate limited by NVIDIA API.".to_string()
+                    } else {
+                        "Rate limit exceeded (429 Too Many Requests)".to_string()
+                    }
+                }
+                500..=599 => {
+                    if self.api_key.is_some() {
+                        "NVIDIA API service error.".to_string()
+                    } else {
+                        format!("Server error: {}", status)
+                    }
+                }
                 _ => format!("HTTP error: {}", status),
             };
             return Err(RuntimeError::LLMError(error_msg));
