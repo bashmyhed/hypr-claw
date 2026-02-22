@@ -1,9 +1,17 @@
 [workspace]
 members = [
+    "crates/core",
+    "crates/policy",
+    "crates/memory",
+    "crates/tools",
+    "crates/executor",
+    "crates/interfaces",
+    "crates/providers",
+    "hypr-claw-app",
+    # Legacy crates (will be migrated)
     "hypr-claw-runtime",
     "hypr-claw-tools",
     "hypr-claw-infra",
-    "hypr-claw-app",
 ]
 resolver = "2"
 
@@ -19,3 +27,8 @@ serde_json = "1.0"
 thiserror = "1.0"
 tracing = "0.1"
 async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+serde_yaml = "0.9"
+reqwest = { version = "0.11", features = ["json"] }
+sysinfo = "0.30"
+tempfile = "3.8"
