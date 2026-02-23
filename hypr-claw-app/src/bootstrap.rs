@@ -11,7 +11,9 @@ pub fn run_bootstrap() -> Result<Config> {
     println!("1. NVIDIA Kimi");
     println!("2. Google Gemini");
     println!("3. Local model");
-    print!("\nChoice [1-3]: ");
+    println!("4. Antigravity (Claude + Gemini via Google OAuth)");
+    println!("5. Gemini CLI (Gemini via Google OAuth)");
+    print!("\nChoice [1-5]: ");
     io::stdout().flush()?;
 
     let mut choice = String::new();
@@ -22,8 +24,10 @@ pub fn run_bootstrap() -> Result<Config> {
         "1" => bootstrap_nvidia(),
         "2" => bootstrap_google(),
         "3" => bootstrap_local(),
+        "4" => bootstrap_antigravity(),
+        "5" => bootstrap_gemini_cli(),
         _ => {
-            anyhow::bail!("Invalid choice. Please select 1, 2, or 3.");
+            anyhow::bail!("Invalid choice. Please select 1-5.");
         }
     }
 }
@@ -171,4 +175,60 @@ fn get_or_create_master_key() -> Result<[u8; 32]> {
         std::fs::write(key_path, key)?;
         Ok(key)
     }
+}
+
+fn bootstrap_antigravity() -> Result<Config> {
+    println!("\n🔐 Antigravity OAuth Setup");
+    println!("This will open a browser for Google authentication.");
+    println!("You'll get access to Claude Opus 4.6 and Gemini 3 models.");
+    println!("\nPress Enter to continue...");
+    let mut _input = String::new();
+    io::stdin().read_line(&mut _input)?;
+
+    // Check if accounts already exist
+    let accounts_path = "./data/antigravity-accounts.json";
+    if std::path::Path::new(accounts_path).exists() {
+        println!("✅ Antigravity accounts found");
+        let config = Config {
+            provider: LLMProvider::Antigravity,
+            model: "antigravity-claude-opus-4-6-thinking-medium".to_string(),
+        };
+        config.save()?;
+        return Ok(config);
+    }
+
+    println!("\n⚠️  No accounts configured yet.");
+    println!("Run this command to authenticate:");
+    println!("  cargo run --example basic_usage -p hypr-claw-antigravity");
+    println!("\nOr manually add accounts to: {}", accounts_path);
+    
+    anyhow::bail!("Antigravity authentication required. Please run the OAuth flow first.");
+}
+
+fn bootstrap_gemini_cli() -> Result<Config> {
+    println!("\n🔐 Gemini CLI OAuth Setup");
+    println!("This will use the same Google OAuth as Antigravity.");
+    println!("You'll get access to Gemini 3 models via CLI quota.");
+    println!("\nPress Enter to continue...");
+    let mut _input = String::new();
+    io::stdin().read_line(&mut _input)?;
+
+    // Check if accounts already exist
+    let accounts_path = "./data/antigravity-accounts.json";
+    if std::path::Path::new(accounts_path).exists() {
+        println!("✅ Accounts found (shared with Antigravity)");
+        let config = Config {
+            provider: LLMProvider::GeminiCli,
+            model: "gemini-3-flash-preview-high".to_string(),
+        };
+        config.save()?;
+        return Ok(config);
+    }
+
+    println!("\n⚠️  No accounts configured yet.");
+    println!("Run this command to authenticate:");
+    println!("  cargo run --example basic_usage -p hypr-claw-antigravity");
+    println!("\nOr manually add accounts to: {}", accounts_path);
+    
+    anyhow::bail!("OAuth authentication required. Please run the OAuth flow first.");
 }

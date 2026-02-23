@@ -17,6 +17,9 @@ pub enum LLMProvider {
     Google,
     #[serde(rename = "local")]
     Local { base_url: String },
+    Antigravity,
+    #[serde(rename = "gemini-cli")]
+    GeminiCli,
 }
 
 impl LLMProvider {
@@ -25,11 +28,17 @@ impl LLMProvider {
             LLMProvider::Nvidia => "https://integrate.api.nvidia.com/v1".to_string(),
             LLMProvider::Google => "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
             LLMProvider::Local { base_url } => base_url.clone(),
+            LLMProvider::Antigravity => "https://daily-cloudcode-pa.sandbox.googleapis.com".to_string(),
+            LLMProvider::GeminiCli => "https://cloudcode-pa.googleapis.com".to_string(),
         }
     }
 
     pub fn requires_api_key(&self) -> bool {
         matches!(self, LLMProvider::Nvidia | LLMProvider::Google)
+    }
+
+    pub fn requires_oauth(&self) -> bool {
+        matches!(self, LLMProvider::Antigravity | LLMProvider::GeminiCli)
     }
 }
 

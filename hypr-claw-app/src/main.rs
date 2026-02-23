@@ -59,6 +59,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         LLMProvider::Nvidia => "NVIDIA Kimi",
         LLMProvider::Google => "Google Gemini",
         LLMProvider::Local { .. } => "Local",
+        LLMProvider::Antigravity => "Antigravity (Claude + Gemini)",
+        LLMProvider::GeminiCli => "Gemini CLI",
     };
     println!("Using provider: {}", provider_name);
     println!();
@@ -200,6 +202,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         LLMProvider::Local { .. } => {
             hypr_claw_runtime::LLMClient::new(config.provider.base_url(), 1)
+        }
+        LLMProvider::Antigravity | LLMProvider::GeminiCli => {
+            eprintln!("❌ Antigravity/Gemini CLI not yet integrated with agent runtime");
+            eprintln!("💡 Use the chat example instead:");
+            eprintln!("   cargo run --example chat -p hypr-claw-antigravity");
+            return Err("Antigravity not integrated yet".into());
         }
     };
 

@@ -19,13 +19,35 @@ Hypr-Claw is an intelligent agent system that:
 
 ---
 
+## Recent Updates
+
+### 🎉 NEW: Antigravity Integration (2026-02-23)
+
+Access Claude Opus 4.6 Thinking and Gemini 3 models via Google's Antigravity API!
+
+**Features:**
+- ✅ Dual quota system (Antigravity + Gemini CLI = 2x capacity)
+- ✅ Multi-account support with automatic rotation
+- ✅ Claude Opus 4.6 Thinking with extended reasoning (up to 32K tokens)
+- ✅ Gemini 3 Pro/Flash with thinking tiers (low/medium/high)
+- ✅ Rate limit mitigation via fingerprint rotation
+
+**Quick test:**
+```bash
+cargo run --example test_integration -p hypr-claw-antigravity
+```
+
+See `crates/hypr-claw-antigravity/` for full documentation.
+
+---
+
 ## Quick Start
 
 ### Prerequisites
 
 - **Rust 1.75+** (2021 edition)
 - **Linux** (tested on Ubuntu/Arch)
-- **LLM provider** (NVIDIA NIM, Google Gemini, or local model via Ollama/LM Studio)
+- **LLM provider** (NVIDIA NIM, Google Gemini, Antigravity, or local model via Ollama/LM Studio)
 
 ### Installation
 

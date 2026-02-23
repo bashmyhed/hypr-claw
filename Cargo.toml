@@ -8,6 +8,7 @@ members = [
     "crates/interfaces",
     "crates/providers",
     "crates/tasks",
+    "crates/hypr-claw-antigravity",
     "hypr-claw-app",
     # Legacy crates (will be migrated)
     "hypr-claw-runtime",
