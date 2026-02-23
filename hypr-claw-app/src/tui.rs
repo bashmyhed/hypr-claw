@@ -43,6 +43,7 @@ pub struct TuiSnapshot {
     pub approval_counts: (usize, usize),
     pub token_usage: (usize, usize, usize),
     pub plan: String,
+    pub reliability: String,
     pub threads: Vec<ThreadRow>,
     pub tasks: Vec<TaskRow>,
     pub supervisor_tasks: Vec<SupervisorTaskRow>,
@@ -402,6 +403,10 @@ fn build_right_panel(snapshot: &TuiSnapshot, width: usize, max_lines: usize) -> 
     out.push(String::new());
     out.push(" Session".to_string());
     out.push(format!("  now: {}", unix_now_compact()));
+    out.push(format!(
+        "  rel: {}",
+        truncate(&snapshot.reliability, width.saturating_sub(8))
+    ));
     out.push(format!(
         "  model: {}",
         truncate(&snapshot.model, width.saturating_sub(10))

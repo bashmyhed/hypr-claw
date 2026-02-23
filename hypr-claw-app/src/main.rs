@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::process::Command;
 
 pub mod bootstrap;
@@ -934,17 +934,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 let class_budget = execution_budget_for_class(&task_class);
+                let watchdog_timeout = watchdog_timeout_for_class(&task_class);
                 let effective_max_iterations = active_soul
                     .max_iterations
                     .min(class_budget.max_iterations)
                     .max(1);
                 agent_loop.set_max_iterations(effective_max_iterations);
+                let run_started_at = Instant::now();
+                let mut fallback_attempts = 0u32;
+                agent_state.reliability.run_id = agent_state.reliability.run_id.saturating_add(1);
+                agent_state.reliability.last_stage = "running".to_string();
+                agent_state.reliability.fallback_attempts = 0;
+                agent_state.reliability.last_duration_ms = 0;
+                agent_state.reliability.last_error.clear();
+                agent_state.reliability.last_break_reason.clear();
+                agent_state.reliability.updated_at = Some(chrono::Utc::now().timestamp());
 
                 println!(
-                    "plan> analyze -> execute tools -> report  [soul={} class={} iter={}]",
+                    "plan> analyze -> execute tools -> report  [soul={} class={} iter={} timeout={}s]",
                     active_soul_id,
                     task_class.as_str(),
-                    agent_loop.max_iterations()
+                    agent_loop.max_iterations(),
+                    watchdog_timeout.as_secs()
                 );
 
                 let mut turn_system_prompt = augment_system_prompt_for_turn(
@@ -953,12 +964,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &active_allowed_tools,
                 );
 
-                let mut run_result = tokio::select! {
-                    res = agent_loop.run(&task_session_key, &agent_name, &turn_system_prompt, &effective_input) => res,
-                    _ = interrupt.notified() => Err(hypr_claw_runtime::RuntimeError::LLMError(
-                        "Interrupted by user".to_string()
-                    )),
-                };
+                let mut run_result = run_with_interrupt_and_timeout(
+                    &agent_loop,
+                    &task_session_key,
+                    &agent_name,
+                    &turn_system_prompt,
+                    &effective_input,
+                    &interrupt,
+                    watchdog_timeout,
+                )
+                .await;
 
                 if use_focused {
                     runtime_registry.set_allowed_tools(active_allowed_tools.clone());
@@ -969,13 +984,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let is_tool_enforcement_error = err_msg.contains("Tool invocation required but not performed");
                     let is_provider_argument_error =
                         err_msg.contains("INVALID_ARGUMENT") || err_msg.contains("400 Bad Request");
-                    let is_max_iterations_error = err_msg.contains("Max iterations");
+                    let is_watchdog_timeout_error =
+                        err_msg.to_lowercase().contains("watchdog timeout");
+                    let is_max_iterations_error = err_msg.contains("Max iterations")
+                        || err_msg.contains("iteration limit")
+                        || err_msg.contains("iterations (")
+                        || err_msg.contains("reached after");
                     let is_tool_execution_error =
                         err_msg.contains("Tool error:")
                             || err_msg.contains("dispatcher error")
                             || err_msg.contains("tool failed");
 
                     if is_tool_enforcement_error {
+                        fallback_attempts += 1;
+                        agent_state.reliability.last_stage = "recovery_tool_enforcement".to_string();
+                        agent_state.reliability.fallback_attempts = fallback_attempts;
                         if let Some(candidate_soul_id) =
                             auto_select_soul_id(&effective_input, &available_souls)
                         {
@@ -1007,46 +1030,77 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
+                        let fallback_playbook =
+                            fallback_playbook_for_input(&effective_input, &active_allowed_tools);
                         let retry_prompt = format!(
-                            "{}\n\nExecute this now using available tools. Do not answer with explanation-only text. If one tool fails, choose another available tool and continue until completion or clear blocker.",
-                            effective_input
+                            "{}\n\nExecute this now using available tools. Do not answer with explanation-only text.\nFallback strategy (deterministic):\n{}\nIf one tool fails, immediately move to the next fallback tool.",
+                            effective_input,
+                            fallback_playbook
                         );
-                        run_result = tokio::select! {
-                            res = agent_loop.run(&task_session_key, &agent_name, &turn_system_prompt, &retry_prompt) => res,
-                            _ = interrupt.notified() => Err(hypr_claw_runtime::RuntimeError::LLMError(
-                                "Interrupted by user".to_string()
-                            )),
-                        };
+                        run_result = run_with_interrupt_and_timeout(
+                            &agent_loop,
+                            &task_session_key,
+                            &agent_name,
+                            &turn_system_prompt,
+                            &retry_prompt,
+                            &interrupt,
+                            watchdog_timeout,
+                        )
+                        .await;
                     } else if is_provider_argument_error {
+                        fallback_attempts += 1;
+                        agent_state.reliability.last_stage = "recovery_provider_argument".to_string();
+                        agent_state.reliability.fallback_attempts = fallback_attempts;
                         let emergency_tools = emergency_tool_subset(&effective_input, &active_allowed_tools);
                         if !emergency_tools.is_empty() && emergency_tools.len() < active_allowed_tools.len() {
                             runtime_registry.set_allowed_tools(emergency_tools);
-                            run_result = tokio::select! {
-                                res = agent_loop.run(&task_session_key, &agent_name, &turn_system_prompt, &effective_input) => res,
-                                _ = interrupt.notified() => Err(hypr_claw_runtime::RuntimeError::LLMError(
-                                    "Interrupted by user".to_string()
-                                )),
-                            };
+                            run_result = run_with_interrupt_and_timeout(
+                                &agent_loop,
+                                &task_session_key,
+                                &agent_name,
+                                &turn_system_prompt,
+                                &effective_input,
+                                &interrupt,
+                                watchdog_timeout,
+                            )
+                            .await;
                             runtime_registry.set_allowed_tools(active_allowed_tools.clone());
                         }
-                    } else if is_max_iterations_error || is_tool_execution_error {
+                    } else if is_max_iterations_error || is_tool_execution_error || is_watchdog_timeout_error {
+                        fallback_attempts += 1;
+                        agent_state.reliability.last_stage = "recovery_runtime".to_string();
+                        agent_state.reliability.fallback_attempts = fallback_attempts;
+                        let fallback_playbook =
+                            fallback_playbook_for_input(&effective_input, &active_allowed_tools);
                         let recovery_prompt = format!(
-                            "{}\n\nRecovery mode:\n1) keep working with available tools\n2) if a tool fails, pick an alternative backend/tool\n3) end with final status and exact remaining blocker only if no alternative worked.",
-                            effective_input
+                            "{}\n\nRecovery mode:\n1) keep working with available tools\n2) if a tool fails, pick the next fallback tool in this table:\n{}\n3) end with final status and exact remaining blocker only if no alternative worked.",
+                            effective_input,
+                            fallback_playbook
                         );
-                        run_result = tokio::select! {
-                            res = agent_loop.run(&task_session_key, &agent_name, &turn_system_prompt, &recovery_prompt) => res,
-                            _ = interrupt.notified() => Err(hypr_claw_runtime::RuntimeError::LLMError(
-                                "Interrupted by user".to_string()
-                            )),
-                        };
+                        run_result = run_with_interrupt_and_timeout(
+                            &agent_loop,
+                            &task_session_key,
+                            &agent_name,
+                            &turn_system_prompt,
+                            &recovery_prompt,
+                            &interrupt,
+                            watchdog_timeout,
+                        )
+                        .await;
                     }
                 }
 
                 agent_loop.set_max_iterations(active_soul.max_iterations);
+                let run_elapsed_ms = run_started_at.elapsed().as_millis() as u64;
 
                 match run_result {
                     Ok(response) => {
+                        agent_state.reliability.last_stage = "completed".to_string();
+                        agent_state.reliability.fallback_attempts = fallback_attempts;
+                        agent_state.reliability.last_duration_ms = run_elapsed_ms;
+                        agent_state.reliability.last_break_reason = "none".to_string();
+                        agent_state.reliability.last_error.clear();
+                        agent_state.reliability.updated_at = Some(chrono::Utc::now().timestamp());
                         if let Some(task_id) = &supervisor_task_id {
                             mark_supervised_task_completed(&mut agent_state, task_id);
                         }
@@ -1063,13 +1117,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("\n{}\n", response);
                     }
                     Err(e) => {
+                        let error_msg = e.to_string();
+                        let break_reason = if error_msg.contains("Interrupted by user") {
+                            "user_interrupt"
+                        } else if error_msg.to_lowercase().contains("watchdog timeout") {
+                            "watchdog_timeout"
+                        } else if error_msg.contains("repetitive tool loop") {
+                            "tool_loop"
+                        } else if error_msg.contains("consecutive tool failures") {
+                            "tool_failure_streak"
+                        } else if error_msg.contains("Max iterations")
+                            || error_msg.contains("iteration limit")
+                        {
+                            "max_iterations"
+                        } else {
+                            "runtime_error"
+                        };
+                        agent_state.reliability.last_stage = "failed".to_string();
+                        agent_state.reliability.fallback_attempts = fallback_attempts;
+                        agent_state.reliability.last_duration_ms = run_elapsed_ms;
+                        agent_state.reliability.last_break_reason = break_reason.to_string();
+                        agent_state.reliability.last_error = error_msg.clone();
+                        agent_state.reliability.updated_at = Some(chrono::Utc::now().timestamp());
                         if let Some(task_id) = &supervisor_task_id {
-                            mark_supervised_task_failed(&mut agent_state, task_id, e.to_string());
+                            mark_supervised_task_failed(&mut agent_state, task_id, error_msg.clone());
                         }
-                        mark_plan_failed(&mut context, &e.to_string());
+                        mark_plan_failed(&mut context, &error_msg);
                         persist_agent_os_state(&mut context, &agent_state);
                         context_manager.save(&context).await?;
-                        if e.to_string().contains("Interrupted by user") {
+                        if error_msg.contains("Interrupted by user") {
                             println!("⏹ Request interrupted by user.\n");
                         } else {
                             eprintln!("❌ Error: {}\n", e);
@@ -1390,6 +1466,7 @@ fn build_tui_snapshot(
             context.token_usage.by_session,
         ),
         plan,
+        reliability: reliability_summary(agent_state),
         threads,
         tasks,
         supervisor_tasks,
@@ -1648,6 +1725,28 @@ fn print_tasks_panel(task_list: &[hypr_claw_tasks::TaskInfo]) {
     }
 }
 
+fn reliability_summary(state: &AgentOsState) -> String {
+    let rel = &state.reliability;
+    let err = if rel.last_error.is_empty() {
+        "none".to_string()
+    } else {
+        truncate_for_table(&rel.last_error, 56)
+    };
+    format!(
+        "run={} stage={} fallbacks={} duration={}ms break={} err={}",
+        rel.run_id,
+        rel.last_stage,
+        rel.fallback_attempts,
+        rel.last_duration_ms,
+        if rel.last_break_reason.is_empty() {
+            "none"
+        } else {
+            rel.last_break_reason.as_str()
+        },
+        err
+    )
+}
+
 fn print_status_panel(
     session_key: &str,
     agent_name: &str,
@@ -1757,6 +1856,7 @@ fn print_status_panel(
         context.token_usage.total_output,
         context.token_usage.by_session
     );
+    println!("  Reliability  : {}", reliability_summary(agent_state));
     if let Some(plan) = &context.current_plan {
         println!(
             "  Plan         : {} [{} step {}/{}]",
@@ -1872,6 +1972,11 @@ fn print_runtime_dashboard(
         } else {
             "off"
         }
+    );
+    println!(
+        "{} {}",
+        ui_dim("Reliability:"),
+        truncate_for_table(&reliability_summary(agent_state), 76)
     );
 
     if let Some(plan) = &context.current_plan {
@@ -2058,6 +2163,33 @@ where
     Ok(())
 }
 
+async fn run_with_interrupt_and_timeout<S, L, D, R, Sum>(
+    agent_loop: &hypr_claw_runtime::AgentLoop<S, L, D, R, Sum>,
+    session_key: &str,
+    agent_name: &str,
+    system_prompt: &str,
+    prompt: &str,
+    interrupt: &Arc<tokio::sync::Notify>,
+    timeout: Duration,
+) -> Result<String, hypr_claw_runtime::RuntimeError>
+where
+    S: hypr_claw_runtime::SessionStore,
+    L: hypr_claw_runtime::LockManager,
+    D: hypr_claw_runtime::ToolDispatcher,
+    R: hypr_claw_runtime::ToolRegistry,
+    Sum: hypr_claw_runtime::Summarizer,
+{
+    tokio::select! {
+        res = agent_loop.run(session_key, agent_name, system_prompt, prompt) => res,
+        _ = interrupt.notified() => Err(hypr_claw_runtime::RuntimeError::LLMError(
+            "Interrupted by user".to_string()
+        )),
+        _ = tokio::time::sleep(timeout) => Err(hypr_claw_runtime::RuntimeError::LLMError(
+            format!("Execution watchdog timeout after {}s", timeout.as_secs())
+        )),
+    }
+}
+
 fn to_context_tasks(
     task_list: Vec<hypr_claw_tasks::TaskInfo>,
 ) -> Vec<hypr_claw_memory::types::TaskState> {
@@ -2208,6 +2340,8 @@ struct AgentOsState {
     active_thread_id: String,
     #[serde(default)]
     supervisor: SupervisorState,
+    #[serde(default)]
+    reliability: ReliabilityState,
 }
 
 impl Default for AgentOsState {
@@ -2218,6 +2352,39 @@ impl Default for AgentOsState {
             task_threads: vec![TaskThread::new("task-1".to_string(), "Main".to_string())],
             active_thread_id: "task-1".to_string(),
             supervisor: SupervisorState::default(),
+            reliability: ReliabilityState::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReliabilityState {
+    #[serde(default)]
+    run_id: u64,
+    #[serde(default)]
+    last_stage: String,
+    #[serde(default)]
+    fallback_attempts: u32,
+    #[serde(default)]
+    last_duration_ms: u64,
+    #[serde(default)]
+    last_error: String,
+    #[serde(default)]
+    last_break_reason: String,
+    #[serde(default)]
+    updated_at: Option<i64>,
+}
+
+impl Default for ReliabilityState {
+    fn default() -> Self {
+        Self {
+            run_id: 0,
+            last_stage: "idle".to_string(),
+            fallback_attempts: 0,
+            last_duration_ms: 0,
+            last_error: String::new(),
+            last_break_reason: String::new(),
+            updated_at: None,
         }
     }
 }
@@ -3259,6 +3426,14 @@ fn execution_budget_for_class(class: &SupervisedTaskClass) -> ExecutionBudget {
     }
 }
 
+fn watchdog_timeout_for_class(class: &SupervisedTaskClass) -> Duration {
+    match class {
+        SupervisedTaskClass::Question => Duration::from_secs(45),
+        SupervisedTaskClass::Action => Duration::from_secs(90),
+        SupervisedTaskClass::Investigation => Duration::from_secs(150),
+    }
+}
+
 fn next_supervised_task_id(state: &mut AgentOsState) -> String {
     let id = format!("sup-{}", state.supervisor.next_id);
     state.supervisor.next_id += 1;
@@ -3665,6 +3840,113 @@ fn emergency_tool_subset(input: &str, allowed: &HashSet<String>) -> HashSet<Stri
     names.into_iter().take(10).collect()
 }
 
+fn fallback_playbook_for_input(input: &str, allowed: &HashSet<String>) -> String {
+    let lower = input.to_lowercase();
+    let mut rows: Vec<(&str, Vec<&str>)> = Vec::new();
+
+    let wallpaper_intent = lower.contains("wallpaper") || lower.contains("background");
+    if wallpaper_intent {
+        rows.push((
+            "wallpaper",
+            vec!["wallpaper.set", "hypr.exec", "desktop.open_url"],
+        ));
+    }
+
+    let desktop_intent = lower.contains("open")
+        || lower.contains("launch")
+        || lower.contains("gmail")
+        || lower.contains("telegram")
+        || lower.contains("browser")
+        || lower.contains("vscode");
+    if desktop_intent {
+        rows.push((
+            "desktop-open",
+            vec![
+                "desktop.launch_app",
+                "desktop.open_url",
+                "proc.spawn",
+                "hypr.exec",
+            ],
+        ));
+    }
+
+    let screen_intent = lower.contains("screen")
+        || lower.contains("ocr")
+        || lower.contains("read my")
+        || lower.contains("summarise");
+    if screen_intent {
+        rows.push((
+            "screen-automation",
+            vec![
+                "desktop.capture_screen",
+                "desktop.ocr_screen",
+                "desktop.find_text",
+                "desktop.click_text",
+                "desktop.mouse_click",
+            ],
+        ));
+    }
+
+    let process_intent = lower.contains("run")
+        || lower.contains("build")
+        || lower.contains("install")
+        || lower.contains("process")
+        || lower.contains("command");
+    if process_intent {
+        rows.push((
+            "process",
+            vec!["proc.spawn", "hypr.exec", "proc.list", "proc.kill"],
+        ));
+    }
+
+    let fs_intent = lower.contains("file")
+        || lower.contains("folder")
+        || lower.contains("dir")
+        || lower.contains("write")
+        || lower.contains("read")
+        || lower.contains("create");
+    if fs_intent {
+        rows.push((
+            "filesystem",
+            vec![
+                "fs.list",
+                "fs.create_dir",
+                "fs.write",
+                "fs.read",
+                "fs.copy",
+                "fs.move",
+                "fs.delete",
+            ],
+        ));
+    }
+
+    if rows.is_empty() {
+        let fallback = emergency_tool_subset(input, allowed)
+            .into_iter()
+            .collect::<Vec<_>>();
+        if fallback.is_empty() {
+            return "- no fallback tools available".to_string();
+        }
+        return format!("- generic: {}", fallback.join(" -> "));
+    }
+
+    let mut lines = Vec::new();
+    for (label, chain) in rows {
+        let available = chain
+            .into_iter()
+            .filter(|tool| allowed.contains(*tool))
+            .collect::<Vec<_>>();
+        if !available.is_empty() {
+            lines.push(format!("- {}: {}", label, available.join(" -> ")));
+        }
+    }
+    if lines.is_empty() {
+        "- no fallback tools available".to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
 fn auto_select_soul_id(input: &str, available_souls: &[String]) -> Option<String> {
     let lower = input.to_lowercase();
     let candidates = [
@@ -3806,10 +4088,20 @@ impl hypr_claw_runtime::ToolDispatcher for RuntimeDispatcherAdapter {
                     println!("{line}");
                     Ok(tool_result.output.unwrap_or(serde_json::json!({})))
                 } else {
-                    let detail = tool_result
+                    let base_detail = tool_result
                         .error
                         .clone()
                         .unwrap_or_else(|| "Unknown error".to_string());
+                    let alternatives = fallback_tools_for_tool(&normalized_tool_name);
+                    let detail = if alternatives.is_empty() {
+                        base_detail
+                    } else {
+                        format!(
+                            "{} | fallback_tools: {}",
+                            base_detail,
+                            alternatives.join(", ")
+                        )
+                    };
                     let line = format!(
                         "✗ action: {} failed in {}ms - {}",
                         normalized_tool_name,
@@ -3822,7 +4114,17 @@ impl hypr_claw_runtime::ToolDispatcher for RuntimeDispatcherAdapter {
                 }
             }
             Err(e) => {
-                let detail = e.to_string();
+                let base_detail = e.to_string();
+                let alternatives = fallback_tools_for_tool(&normalized_tool_name);
+                let detail = if alternatives.is_empty() {
+                    base_detail
+                } else {
+                    format!(
+                        "{} | fallback_tools: {}",
+                        base_detail,
+                        alternatives.join(", ")
+                    )
+                };
                 let line = format!(
                     "✗ action: {} dispatcher error in {}ms - {}",
                     normalized_tool_name,
@@ -3834,6 +4136,29 @@ impl hypr_claw_runtime::ToolDispatcher for RuntimeDispatcherAdapter {
                 Err(hypr_claw_runtime::RuntimeError::ToolError(detail))
             }
         }
+    }
+}
+
+fn fallback_tools_for_tool(tool_name: &str) -> Vec<&'static str> {
+    match tool_name {
+        "wallpaper.set" => vec!["hypr.exec"],
+        "desktop.open_gmail" => vec!["desktop.open_url", "desktop.launch_app"],
+        "desktop.open_url" => vec!["desktop.search_web", "desktop.launch_app"],
+        "desktop.launch_app" => vec!["proc.spawn", "hypr.exec"],
+        "proc.spawn" => vec!["hypr.exec", "desktop.launch_app"],
+        "desktop.capture_screen" => vec!["hypr.exec"],
+        "desktop.ocr_screen" => vec!["desktop.capture_screen"],
+        "desktop.click_text" => vec!["desktop.find_text", "desktop.mouse_click"],
+        "desktop.find_text" => vec!["desktop.ocr_screen", "desktop.capture_screen"],
+        "hypr.workspace.switch" => vec!["hypr.exec"],
+        "hypr.window.focus" => vec!["hypr.exec"],
+        "hypr.window.move" => vec!["hypr.exec"],
+        "hypr.window.close" => vec!["hypr.exec"],
+        "hypr.exec" => vec!["proc.spawn"],
+        "fs.list" => vec!["hypr.exec"],
+        "fs.read" => vec!["hypr.exec"],
+        "fs.write" => vec!["hypr.exec"],
+        _ => Vec::new(),
     }
 }
 

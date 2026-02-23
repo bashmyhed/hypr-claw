@@ -536,15 +536,33 @@ impl LLMClient {
                                     .unwrap_or(serde_json::json!({})),
                             }
                         } else {
-                            LLMResponse::Final {
-                                schema_version: crate::types::SCHEMA_VERSION,
-                                content: choice.message.content.clone().unwrap_or_default(),
+                            let content = choice.message.content.clone().unwrap_or_default();
+                            if let Some((tool_name, input)) = parse_inline_tool_call(&content) {
+                                LLMResponse::ToolCall {
+                                    schema_version: crate::types::SCHEMA_VERSION,
+                                    tool_name,
+                                    input,
+                                }
+                            } else {
+                                LLMResponse::Final {
+                                    schema_version: crate::types::SCHEMA_VERSION,
+                                    content,
+                                }
                             }
                         }
                     } else {
-                        LLMResponse::Final {
-                            schema_version: crate::types::SCHEMA_VERSION,
-                            content: choice.message.content.clone().unwrap_or_default(),
+                        let content = choice.message.content.clone().unwrap_or_default();
+                        if let Some((tool_name, input)) = parse_inline_tool_call(&content) {
+                            LLMResponse::ToolCall {
+                                schema_version: crate::types::SCHEMA_VERSION,
+                                tool_name,
+                                input,
+                            }
+                        } else {
+                            LLMResponse::Final {
+                                schema_version: crate::types::SCHEMA_VERSION,
+                                content,
+                            }
                         }
                     }
                 } else {
@@ -594,6 +612,83 @@ fn extract_retry_seconds(msg: &str) -> Option<u64> {
         }
     }
     None
+}
+
+fn parse_inline_tool_call(content: &str) -> Option<(String, serde_json::Value)> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let (Some(start), Some(end)) = (trimmed.find("<tool_call>"), trimmed.find("</tool_call>")) {
+        if end > start + "<tool_call>".len() {
+            let inner = &trimmed[start + "<tool_call>".len()..end];
+            if let Some(parsed) = parse_tool_call_payload(inner.trim()) {
+                return Some(parsed);
+            }
+        }
+    }
+
+    parse_tool_call_payload(trimmed)
+}
+
+fn parse_tool_call_payload(payload: &str) -> Option<(String, serde_json::Value)> {
+    if payload.is_empty() {
+        return None;
+    }
+
+    if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(payload) {
+        if let Some((tool_name, input)) = extract_tool_from_json(&json_value) {
+            return Some((tool_name, input));
+        }
+    }
+
+    if let Some(start) = payload.find('{') {
+        let (name_part, json_part) = payload.split_at(start);
+        let candidate = name_part.trim().trim_matches('"').trim_matches('\'');
+        if looks_like_tool_name(candidate) {
+            if let Ok(input) = serde_json::from_str::<serde_json::Value>(json_part) {
+                return Some((candidate.to_string(), input));
+            }
+        }
+    }
+
+    if looks_like_tool_name(payload) {
+        return Some((payload.to_string(), serde_json::json!({})));
+    }
+
+    None
+}
+
+fn extract_tool_from_json(value: &serde_json::Value) -> Option<(String, serde_json::Value)> {
+    let obj = value.as_object()?;
+
+    let tool_name = obj
+        .get("tool_name")
+        .or_else(|| obj.get("name"))
+        .or_else(|| obj.get("tool"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|name| looks_like_tool_name(name))?
+        .to_string();
+
+    let input = obj
+        .get("input")
+        .cloned()
+        .or_else(|| obj.get("arguments").cloned())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    Some((tool_name, input))
+}
+
+fn looks_like_tool_name(candidate: &str) -> bool {
+    if candidate.len() < 3 || candidate.len() > 128 {
+        return false;
+    }
+    candidate
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+        && (candidate.contains('.') || candidate.contains('_'))
 }
 
 #[cfg(test)]
@@ -699,5 +794,29 @@ mod tests {
         assert!(serialized.contains("system_prompt"));
         assert!(serialized.contains("messages"));
         assert!(serialized.contains("tools"));
+    }
+
+    #[test]
+    fn test_parse_inline_tool_call_tag_name_only() {
+        let parsed = parse_inline_tool_call("<tool_call>desktop.capture_screen</tool_call>")
+            .expect("inline tool call should parse");
+        assert_eq!(parsed.0, "desktop.capture_screen");
+        assert_eq!(parsed.1, json!({}));
+    }
+
+    #[test]
+    fn test_parse_inline_tool_call_json_payload() {
+        let parsed = parse_inline_tool_call(
+            r#"{"tool_name":"fs.list","input":{"path":"/home/rick/Downloads"}}"#,
+        )
+        .expect("json tool call should parse");
+        assert_eq!(parsed.0, "fs.list");
+        assert_eq!(parsed.1, json!({"path":"/home/rick/Downloads"}));
+    }
+
+    #[test]
+    fn test_parse_inline_tool_call_non_tool_text() {
+        let parsed = parse_inline_tool_call("Hello, how can I help?");
+        assert!(parsed.is_none());
     }
 }

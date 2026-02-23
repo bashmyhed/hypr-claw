@@ -198,8 +198,12 @@ where
 
         let action_requires_tool = requires_tool_call_for_user_message(user_message);
         let mut saw_tool_call = false;
+        let mut successful_tool_calls = 0usize;
         let mut tool_call_count = 0usize;
         let mut last_tool_error: Option<String> = None;
+        let mut last_tool_signature: Option<String> = None;
+        let mut same_tool_signature_count = 0usize;
+        let mut consecutive_tool_failures = 0usize;
         let max_iterations = self.max_iterations();
 
         for iteration in 0..max_iterations {
@@ -223,6 +227,12 @@ where
                             "Tool invocation required but not performed".to_string(),
                         ));
                     }
+                    if action_requires_tool && successful_tool_calls == 0 {
+                        return Err(RuntimeError::ToolError(
+                            "Action requested, but no tool call completed successfully."
+                                .to_string(),
+                        ));
+                    }
                     info!(
                         "LLM returned final response after {} iterations",
                         iteration + 1
@@ -234,6 +244,19 @@ where
                 } => {
                     saw_tool_call = true;
                     tool_call_count += 1;
+                    let signature = format!("{}:{}", tool_name, input);
+                    if last_tool_signature.as_ref() == Some(&signature) {
+                        same_tool_signature_count += 1;
+                    } else {
+                        same_tool_signature_count = 1;
+                        last_tool_signature = Some(signature);
+                    }
+                    if same_tool_signature_count >= 3 {
+                        return Err(RuntimeError::ToolError(format!(
+                            "Detected repetitive tool loop for '{}' with identical input. Aborting to avoid stuck execution.",
+                            tool_name
+                        )));
+                    }
                     info!("LLM requested tool: {}", tool_name);
 
                     // Append tool call message
@@ -248,6 +271,7 @@ where
                     ));
 
                     // Execute tool
+                    let mut tool_failed = false;
                     let tool_result = match self
                         .tool_dispatcher
                         .execute(&tool_name, &input, session_key)
@@ -255,13 +279,27 @@ where
                     {
                         Ok(result) => result,
                         Err(e) => {
+                            tool_failed = true;
                             warn!("Tool execution failed: {}", e);
                             json!({"error": e.to_string()})
                         }
                     };
 
                     if let Some(err) = tool_result.get("error").and_then(|v| v.as_str()) {
+                        tool_failed = true;
                         last_tool_error = Some(err.to_string());
+                    }
+                    if tool_failed {
+                        consecutive_tool_failures += 1;
+                    } else {
+                        consecutive_tool_failures = 0;
+                        successful_tool_calls += 1;
+                        last_tool_error = None;
+                    }
+                    if consecutive_tool_failures >= 4 {
+                        return Err(RuntimeError::ToolError(
+                            "Too many consecutive tool failures. Halting this run.".to_string(),
+                        ));
                     }
 
                     // Append tool result
@@ -279,13 +317,12 @@ where
         // Max iterations exceeded
         if saw_tool_call {
             let mut summary = format!(
-                "Execution reached iteration limit ({max_iterations}) after {tool_call_count} tool calls."
+                "Max iterations ({max_iterations}) reached after {tool_call_count} tool calls (successful: {successful_tool_calls})."
             );
             if let Some(last_error) = last_tool_error {
                 summary.push_str(&format!(" Last tool error: {}", last_error));
             }
-            summary.push_str(" I can continue from this state if you say 'continue'.");
-            return Ok(summary);
+            return Err(RuntimeError::LLMError(summary));
         }
 
         Err(RuntimeError::LLMError(format!(
@@ -307,11 +344,24 @@ fn requires_tool_call_for_user_message(user_message: &str) -> bool {
         "write",
         "list",
         "open",
+        "launch",
+        "change",
+        "set",
         "switch",
         "workspace",
         "focus",
         "close",
+        "lock",
+        "unlock",
         "wallpaper",
+        "gmail",
+        "email",
+        "telegram",
+        "message",
+        "reply",
+        "send",
+        "volume",
+        "music",
         "spawn",
         "start",
         "stop",
