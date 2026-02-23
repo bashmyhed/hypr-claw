@@ -6,6 +6,7 @@ pub const REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 pub const SCOPE: &str = "openid profile email offline_access";
 
 // Codex API
+#[allow(dead_code)]
 pub const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 pub const CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 
@@ -18,4 +19,5 @@ pub const VALUE_OPENAI_BETA: &str = "responses=experimental";
 pub const VALUE_ORIGINATOR: &str = "codex_cli_rs";
 
 // JWT
+#[allow(dead_code)]
 pub const JWT_ACCOUNT_ID_CLAIM: &str = "https://api.openai.com/auth";

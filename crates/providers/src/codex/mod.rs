@@ -66,12 +66,12 @@ impl CodexProvider {
     }
 
     async fn ensure_valid_token(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let tokens = self.tokens.read().await;
+        let guard = self.tokens.read().await;
 
-        if let Some(tokens) = tokens.as_ref() {
+        if let Some(tokens) = guard.as_ref() {
             if is_token_expired(tokens) {
                 let refresh_token = tokens.refresh_token.clone();
-                drop(tokens);
+                drop(guard);
                 println!("[Codex] Token expired, refreshing...");
                 let new_tokens = refresh_access_token(&refresh_token).await?;
                 *self.tokens.write().await = Some(new_tokens);

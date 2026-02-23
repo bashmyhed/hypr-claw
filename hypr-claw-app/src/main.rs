@@ -961,6 +961,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         continue;
                     }
+                    "capabilities history" | "/capabilities history" => {
+                        print_capability_delta_history(&user_id, 20);
+                        continue;
+                    }
                     "capabilities" | "/capabilities" => {
                         print_capability_registry_summary(&user_id, &capability_registry);
                         continue;
@@ -1011,9 +1015,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             agent_state.onboarding.profile_confirmed = true;
                             agent_state.onboarding.last_scan_at =
                                 Some(chrono::Utc::now().timestamp());
+                            let old_registry_for_history = capability_registry.clone();
                             capability_registry = scanned_registry;
                             if let Err(e) = save_capability_registry(&user_id, &capability_registry) {
                                 eprintln!("⚠️  Failed to save capability registry: {}", e);
+                            }
+                            if let Err(e) = append_capability_delta_history(
+                                &user_id,
+                                &old_registry_for_history,
+                                &capability_registry,
+                            ) {
+                                eprintln!("⚠️  Failed to append capability delta history: {}", e);
                             }
                             persist_agent_os_state(&mut context, &agent_state);
                             context_manager.save(&context).await?;
@@ -4874,6 +4886,83 @@ fn save_capability_registry(user_id: &str, registry: &Value) -> io::Result<()> {
     std::fs::write(path, payload)
 }
 
+/// Appends a timestamped capability delta record to the user's delta history (JSONL).
+fn append_capability_delta_history(
+    user_id: &str,
+    old_registry: &Value,
+    new_registry: &Value,
+) -> io::Result<()> {
+    std::fs::create_dir_all("./data/capabilities")?;
+    let path = format!(
+        "./data/capabilities/{}.deltas.jsonl",
+        sanitize_user_key_for_filename(user_id)
+    );
+    let diff_lines = capability_registry_diff_lines(old_registry, new_registry);
+    let summary = if diff_lines.is_empty() {
+        "no changes".to_string()
+    } else {
+        format!("{} change(s)", diff_lines.len())
+    };
+    let at = chrono::Utc::now().timestamp();
+    let record = json!({
+        "at": at,
+        "summary": summary,
+        "diff_lines": diff_lines,
+    });
+    let line = serde_json::to_string(&record)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let mut content = line;
+    content.push('\n');
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?
+        .write_all(content.as_bytes())
+}
+
+/// Reads the last N lines from the user's capability deltas JSONL file (newest last in file).
+fn read_capability_delta_history(user_id: &str, limit: usize) -> Vec<Value> {
+    let path = format!(
+        "./data/capabilities/{}.deltas.jsonl",
+        sanitize_user_key_for_filename(user_id)
+    );
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let lines: Vec<&str> = content.lines().filter(|s| !s.trim().is_empty()).collect();
+    let start = lines.len().saturating_sub(limit);
+    lines[start..]
+        .iter()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+fn print_capability_delta_history(user_id: &str, limit: usize) {
+    let records = read_capability_delta_history(user_id, limit);
+    println!("\n{}", ui_title("Capability delta history"));
+    if records.is_empty() {
+        println!("  No delta history yet. Run `scan` and apply changes to record deltas.");
+        return;
+    }
+    for (i, rec) in records.iter().enumerate() {
+        let at = rec.get("at").and_then(|v| v.as_i64()).unwrap_or(0);
+        let summary = rec.get("summary").and_then(|v| v.as_str()).unwrap_or("?");
+        println!("  {}  {}  {}", i + 1, format_timestamp(at), summary);
+        if let Some(arr) = rec.get("diff_lines").and_then(|v| v.as_array()) {
+            for line in arr.iter().take(5) {
+                if let Some(s) = line.as_str() {
+                    println!("      - {}", truncate_for_table(s, 72));
+                }
+            }
+            if arr.len() > 5 {
+                println!("      ... and {} more", arr.len() - 5);
+            }
+        }
+    }
+    println!();
+}
+
 fn print_capability_registry_summary(user_id: &str, registry: &Value) {
     let generated = registry
         .pointer("/generated_at")
@@ -6037,6 +6126,81 @@ fn supervised_task_status(state: &AgentOsState, task_id: &str) -> Option<Supervi
         .map(|task| task.status.clone())
 }
 
+fn resolve_supervisor_task<'a>(
+    target: &str,
+    agent_state: &'a AgentOsState,
+) -> Option<&'a SupervisedTask> {
+    agent_state
+        .supervisor
+        .tasks
+        .iter()
+        .find(|task| task.id == target || task.background_task_id.as_deref() == Some(target))
+}
+
+fn print_supervisor_task_inspect(task: &SupervisedTask) {
+    println!("Supervisor task: {}", task.id);
+    println!("  prompt: {}", truncate_for_table(&task.prompt, 72));
+    println!("  class: {}", task.class.as_str());
+    println!(
+        "  status: {}",
+        match &task.status {
+            SupervisedTaskStatus::Queued => "queued",
+            SupervisedTaskStatus::Running => "running",
+            SupervisedTaskStatus::Completed => "completed",
+            SupervisedTaskStatus::Failed => "failed",
+            SupervisedTaskStatus::Cancelled => "cancelled",
+        }
+    );
+    if !task.resources.is_empty() {
+        println!("  resources: {}", task.resources.join(", "));
+    }
+    if let Some(bg) = &task.background_task_id {
+        println!("  background_task_id: {}", bg);
+    }
+    println!("  created_at: {}", task.created_at);
+    println!("  updated_at: {}", task.updated_at);
+    if let Some(err) = &task.error {
+        println!("  error: {}", err);
+    }
+}
+
+fn collect_supervisor_task_events(
+    task: &SupervisedTask,
+    task_event_feed: &Arc<Mutex<Vec<String>>>,
+    limit: usize,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Ok(events) = task_event_feed.lock() {
+        for line in events.iter() {
+            let mention = line.contains(&task.id)
+                || task
+                    .background_task_id
+                    .as_ref()
+                    .map_or(false, |bg| line.contains(bg.as_str()));
+            if mention {
+                out.push(line.clone());
+            }
+        }
+    }
+    let len = out.len();
+    if len <= limit {
+        out
+    } else {
+        out.into_iter().skip(len - limit).collect()
+    }
+}
+
+fn print_supervisor_task_events(task: &SupervisedTask, event_rows: &[String], _limit: usize) {
+    println!(
+        "Events for supervisor task {} ({} entries):",
+        task.id,
+        event_rows.len()
+    );
+    for row in event_rows {
+        println!("  {}", row);
+    }
+}
+
 fn set_supervised_task_background_id(
     state: &mut AgentOsState,
     task_id: &str,
@@ -6749,9 +6913,19 @@ impl RuntimeDispatcherAdapter {
         Self { inner, action_feed }
     }
 
-    fn push_action(&self, line: String) {
+    /// Prefix with [task_id] when session_key is a supervisor task (e.g. "user:agent::sup::sup-1").
+    pub(crate) fn task_tag(session_key: &str) -> Option<&str> {
+        session_key.split("::sup::").nth(1)
+    }
+
+    fn push_action(&self, session_key: &str, line: String) {
+        let tagged = if let Some(tag) = Self::task_tag(session_key) {
+            format!("[{}] {}", tag, line)
+        } else {
+            line
+        };
         if let Ok(mut feed) = self.action_feed.lock() {
-            feed.push(line);
+            feed.push(tagged);
             if feed.len() > 256 {
                 let drop_count = feed.len() - 256;
                 feed.drain(0..drop_count);
@@ -6775,14 +6949,14 @@ impl hypr_claw_runtime::ToolDispatcher for RuntimeDispatcherAdapter {
             normalized_tool_name,
             truncate_for_table(&input.to_string(), 96)
         );
-        self.push_action(line.clone());
+        self.push_action(session_key, line.clone());
         println!("{line}");
         if normalized_tool_name != tool_name {
             let alias = format!(
                 "  info: remapped non-standard tool '{}' -> '{}'",
                 tool_name, normalized_tool_name
             );
-            self.push_action(alias.clone());
+            self.push_action(session_key, alias.clone());
             println!("{alias}");
         }
         let result = self
@@ -6802,7 +6976,7 @@ impl hypr_claw_runtime::ToolDispatcher for RuntimeDispatcherAdapter {
                         normalized_tool_name,
                         started.elapsed().as_millis()
                     );
-                    self.push_action(line.clone());
+                    self.push_action(session_key, line.clone());
                     println!("{line}");
                     Ok(tool_result.output.unwrap_or(serde_json::json!({})))
                 } else {
@@ -6826,7 +7000,7 @@ impl hypr_claw_runtime::ToolDispatcher for RuntimeDispatcherAdapter {
                         started.elapsed().as_millis(),
                         truncate_for_table(&detail, 84)
                     );
-                    self.push_action(line.clone());
+                    self.push_action(session_key, line.clone());
                     println!("{line}");
                     Err(hypr_claw_runtime::RuntimeError::ToolError(detail))
                 }
@@ -6849,7 +7023,7 @@ impl hypr_claw_runtime::ToolDispatcher for RuntimeDispatcherAdapter {
                     started.elapsed().as_millis(),
                     truncate_for_table(&detail, 84)
                 );
-                self.push_action(line.clone());
+                self.push_action(session_key, line.clone());
                 println!("{line}");
                 Err(hypr_claw_runtime::RuntimeError::ToolError(detail))
             }
@@ -7444,5 +7618,59 @@ mod reliability_policy_tests {
         let lines = build_task_log_lines(&bg_tasks, &state, &task_event_feed);
         assert!(lines.iter().any(|line| line.contains("bg bg-1")));
         assert!(lines.iter().any(|line| line.contains("sup sup-1")));
+    }
+
+    #[test]
+    fn action_feed_task_tag_extracts_supervisor_id() {
+        assert_eq!(
+            RuntimeDispatcherAdapter::task_tag("user:agent::sup::sup-1"),
+            Some("sup-1")
+        );
+        assert_eq!(
+            RuntimeDispatcherAdapter::task_tag("alice:hypr-claw::sup::sup-42"),
+            Some("sup-42")
+        );
+        assert_eq!(RuntimeDispatcherAdapter::task_tag("user:agent"), None);
+        assert_eq!(RuntimeDispatcherAdapter::task_tag(""), None);
+    }
+
+    #[test]
+    fn capability_delta_history_roundtrip() {
+        let old_r = json!({"platform": {"distro_name": "old"}, "generated_at": 100});
+        let new_r = json!({"platform": {"distro_name": "arch"}, "generated_at": 200});
+        let diff = capability_registry_diff_lines(&old_r, &new_r);
+        assert!(
+            !diff.is_empty(),
+            "diff should be non-empty when registries differ"
+        );
+        let record = json!({
+            "at": chrono::Utc::now().timestamp(),
+            "summary": format!("{} change(s)", diff.len()),
+            "diff_lines": diff,
+        });
+        let line = serde_json::to_string(&record).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let read_back = parsed.get("diff_lines").unwrap().as_array().unwrap();
+        assert!(read_back.len() > 0);
+    }
+
+    #[test]
+    fn start_next_returns_empty_when_no_queued_tasks() {
+        let mut state = AgentOsState::default();
+        let result = start_next_queued_supervised_task(&mut state);
+        assert!(matches!(result, QueueStartResult::Empty));
+        state.supervisor.tasks.push(SupervisedTask {
+            id: "sup-1".to_string(),
+            prompt: "done task".to_string(),
+            class: SupervisedTaskClass::Action,
+            resources: vec!["network".to_string()],
+            background_task_id: None,
+            status: SupervisedTaskStatus::Completed,
+            created_at: 0,
+            updated_at: 0,
+            error: None,
+        });
+        let result2 = start_next_queued_supervised_task(&mut state);
+        assert!(matches!(result2, QueueStartResult::Empty));
     }
 }

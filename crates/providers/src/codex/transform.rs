@@ -72,6 +72,7 @@ pub fn build_codex_request(
     }
 }
 
+#[allow(dead_code)]
 pub fn parse_codex_response(
     response: CodexResponse,
 ) -> Result<(Option<String>, Vec<crate::traits::ToolCall>), String> {

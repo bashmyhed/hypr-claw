@@ -175,7 +175,9 @@ and
 
 Known warning class left:
 
-1. Unused constants/functions in Codex provider module (`crates/providers/src/codex/*`).
+1. Unused constants/functions in Codex provider module (`crates/providers/src/codex/*`). *(Fixed: dead_code allow + drop guard.)*
+
+**Rest work completed:** E2E smoke test (`tests/e2e_workflow_test.rs`, run with `--ignored`), REPL/queue unit test (`start_next_returns_empty_when_no_queued_tasks`), Production testing checklist (`docs/PRODUCTION_TESTING.md`).
 
 ## 5. What Is Left (Production Testing Target)
 

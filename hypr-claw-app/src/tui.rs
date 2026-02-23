@@ -75,6 +75,19 @@ const RESET: &str = "\x1b[0m";
 const DIM: &str = "\x1b[2m";
 const ACCENT: &str = "\x1b[38;5;39m";
 
+/// Minimum terminal width; below this we clamp to avoid broken layout.
+const MIN_TERMINAL_WIDTH: usize = 60;
+/// Maximum terminal width; above this we clamp to keep line length readable.
+const MAX_TERMINAL_WIDTH: usize = 220;
+/// Minimum lines for the body (two panels); ensures something is visible on small terminals.
+const MIN_BODY_LINES: usize = 6;
+/// Header rows (borders + status lines) reserved above the panel body.
+const HEADER_LINES: usize = 14;
+/// Minimum width for the right panel (Decision Feed, Task Log, Controls).
+const MIN_RIGHT_PANEL_WIDTH: usize = 22;
+/// Minimum width for the left panel (Threads, Background Tasks, Supervisor Queue, Messages).
+const MIN_LEFT_PANEL_WIDTH: usize = 26;
+
 fn paint(text: &str, style: &str) -> String {
     if std::env::var_os("NO_COLOR").is_none() {
         format!("{style}{text}{RESET}")
@@ -264,13 +277,17 @@ fn stdin_ready(timeout: Duration) -> io::Result<bool> {
 
 fn render(snapshot: &TuiSnapshot) -> io::Result<()> {
     let (width, height) = terminal_size();
-    let width = width.clamp(60, 220);
-    let body_lines = height.saturating_sub(14).max(10);
-    let preferred_left = ((width as f32) * 0.62) as usize;
-    let min_left = 28;
-    let max_left = width.saturating_sub(20).max(min_left);
-    let left_w = preferred_left.clamp(min_left, max_left);
-    let right_w = width.saturating_sub(left_w + 3);
+    let width = width.clamp(MIN_TERMINAL_WIDTH, MAX_TERMINAL_WIDTH);
+    let body_lines = height.saturating_sub(HEADER_LINES).max(MIN_BODY_LINES);
+
+    // Stable panel split: ensure both panels have at least minimum width so alignment holds.
+    let content_width = width.saturating_sub(3); // two borders and one separator
+    let preferred_left = ((content_width as f32) * 0.62) as usize;
+    let left_w = preferred_left.clamp(
+        MIN_LEFT_PANEL_WIDTH,
+        content_width.saturating_sub(MIN_RIGHT_PANEL_WIDTH),
+    );
+    let right_w = content_width.saturating_sub(left_w);
 
     print!("\x1b[2J\x1b[H");
 
