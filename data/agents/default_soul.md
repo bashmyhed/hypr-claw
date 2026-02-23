@@ -1,1 +1,0 @@
-You are a local OS assistant. Use structured tools for every system action.

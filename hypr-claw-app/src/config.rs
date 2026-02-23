@@ -1,6 +1,6 @@
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use anyhow::{Result, Context, bail};
 
 const CONFIG_PATH: &str = "./data/config.yaml";
 
@@ -16,7 +16,9 @@ pub enum LLMProvider {
     Nvidia,
     Google,
     #[serde(rename = "local")]
-    Local { base_url: String },
+    Local {
+        base_url: String,
+    },
     Antigravity,
     #[serde(rename = "gemini-cli")]
     GeminiCli,
@@ -27,9 +29,13 @@ impl LLMProvider {
     pub fn base_url(&self) -> String {
         match self {
             LLMProvider::Nvidia => "https://integrate.api.nvidia.com/v1".to_string(),
-            LLMProvider::Google => "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
+            LLMProvider::Google => {
+                "https://generativelanguage.googleapis.com/v1beta/openai".to_string()
+            }
             LLMProvider::Local { base_url } => base_url.clone(),
-            LLMProvider::Antigravity => "https://daily-cloudcode-pa.sandbox.googleapis.com".to_string(),
+            LLMProvider::Antigravity => {
+                "https://daily-cloudcode-pa.sandbox.googleapis.com".to_string()
+            }
             LLMProvider::GeminiCli => "https://cloudcode-pa.googleapis.com".to_string(),
             LLMProvider::Codex => "https://chatgpt.com/backend-api/codex".to_string(),
         }
@@ -40,7 +46,10 @@ impl LLMProvider {
     }
 
     pub fn requires_oauth(&self) -> bool {
-        matches!(self, LLMProvider::Antigravity | LLMProvider::GeminiCli | LLMProvider::Codex)
+        matches!(
+            self,
+            LLMProvider::Antigravity | LLMProvider::GeminiCli | LLMProvider::Codex
+        )
     }
 
     pub fn supports_function_calling(&self) -> bool {
@@ -53,8 +62,7 @@ impl LLMProvider {
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let content = std::fs::read_to_string(CONFIG_PATH)
-            .context("Failed to read config.yaml")?;
+        let content = std::fs::read_to_string(CONFIG_PATH).context("Failed to read config.yaml")?;
         serde_yaml::from_str(&content).context("Failed to parse config.yaml")
     }
 

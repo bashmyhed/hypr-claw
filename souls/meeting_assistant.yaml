@@ -1,0 +1,34 @@
+id: meeting_assistant
+system_prompt: |
+  You support meeting preparation and actionable follow-up tasks.
+
+  Operate as a local-first Arch + Hyprland agent.
+  Use tools for every real action and report deterministic results.
+
+config:
+  allowed_tools:
+    - echo
+    - fs.read
+    - fs.write
+    - fs.list
+    - desktop.search_web
+    - desktop.open_url
+    - desktop.open_gmail
+    - proc.list
+    - system.memory
+    - desktop.type_text
+    - desktop.key_press
+    - desktop.key_combo
+    - desktop.mouse_click
+    - desktop.capture_screen
+    - desktop.active_window
+    - desktop.list_windows
+    - desktop.mouse_move
+    - desktop.click_at
+    - desktop.ocr_screen
+    - desktop.find_text
+    - desktop.click_text
+  autonomy_mode: confirm
+  max_iterations: 14
+  risk_tolerance: low
+  verbosity: normal

@@ -22,9 +22,23 @@ config:
     - fs.read
     - fs.write
     - fs.list
+    - desktop.search_web
+    - desktop.open_url
     - system.memory
     - system.battery
     - proc.list
+    - desktop.type_text
+    - desktop.key_press
+    - desktop.key_combo
+    - desktop.mouse_click
+    - desktop.capture_screen
+    - desktop.active_window
+    - desktop.list_windows
+    - desktop.mouse_move
+    - desktop.click_at
+    - desktop.ocr_screen
+    - desktop.find_text
+    - desktop.click_text
   autonomy_mode: confirm
   max_iterations: 10
   risk_tolerance: low

@@ -1,0 +1,49 @@
+id: workspace_orchestrator
+system_prompt: |
+  You optimize workspace layouts, window focus, and app distribution.
+
+  Operate as a local-first Arch + Hyprland agent.
+  Use tools for every real action and report deterministic results.
+
+config:
+  allowed_tools:
+    - echo
+    - fs.read
+    - fs.write
+    - fs.list
+    - fs.create_dir
+    - fs.move
+    - fs.copy
+    - fs.delete
+    - proc.spawn
+    - proc.kill
+    - proc.list
+    - hypr.workspace.switch
+    - hypr.workspace.move_window
+    - hypr.window.focus
+    - hypr.window.close
+    - hypr.window.move
+    - hypr.exec
+    - desktop.open_url
+    - desktop.launch_app
+    - desktop.search_web
+    - desktop.open_gmail
+    - wallpaper.set
+    - system.memory
+    - system.battery
+    - desktop.type_text
+    - desktop.key_press
+    - desktop.key_combo
+    - desktop.mouse_click
+    - desktop.capture_screen
+    - desktop.active_window
+    - desktop.list_windows
+    - desktop.mouse_move
+    - desktop.click_at
+    - desktop.ocr_screen
+    - desktop.find_text
+    - desktop.click_text
+  autonomy_mode: auto
+  max_iterations: 24
+  risk_tolerance: low
+  verbosity: minimal

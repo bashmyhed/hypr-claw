@@ -1,5 +1,5 @@
 use crate::config::{Config, LLMProvider};
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use std::io::{self, Write};
 
 const NVIDIA_API_KEY_NAME: &str = "llm/nvidia_api_key";
@@ -36,8 +36,7 @@ pub fn run_bootstrap() -> Result<Config> {
 
 fn bootstrap_nvidia() -> Result<Config> {
     println!("\nEnter NVIDIA API key:");
-    let api_key = rpassword::read_password()
-        .context("Failed to read API key")?;
+    let api_key = rpassword::read_password().context("Failed to read API key")?;
 
     if api_key.trim().is_empty() {
         anyhow::bail!("API key cannot be empty");
@@ -49,7 +48,7 @@ fn bootstrap_nvidia() -> Result<Config> {
         "./data/credentials",
         &master_key,
     )?;
-    
+
     cred_store.store_secret(NVIDIA_API_KEY_NAME, api_key.trim())?;
 
     let config = Config {
@@ -65,8 +64,7 @@ fn bootstrap_nvidia() -> Result<Config> {
 
 fn bootstrap_google() -> Result<Config> {
     println!("\nEnter Google API key:");
-    let api_key = rpassword::read_password()
-        .context("Failed to read API key")?;
+    let api_key = rpassword::read_password().context("Failed to read API key")?;
 
     if api_key.trim().is_empty() {
         anyhow::bail!("API key cannot be empty");
@@ -78,7 +76,7 @@ fn bootstrap_google() -> Result<Config> {
         "./data/credentials",
         &master_key,
     )?;
-    
+
     cred_store.store_secret(GOOGLE_API_KEY_NAME, api_key.trim())?;
 
     let config = Config {
@@ -95,7 +93,7 @@ fn bootstrap_google() -> Result<Config> {
 fn bootstrap_local() -> Result<Config> {
     print!("\nEnter local LLM base URL: ");
     io::stdout().flush()?;
-    
+
     let mut base_url = String::new();
     io::stdin().read_line(&mut base_url)?;
     let base_url = base_url.trim().to_string();
@@ -121,8 +119,9 @@ pub fn get_nvidia_api_key() -> Result<String> {
         "./data/credentials",
         &master_key,
     )?;
-    
-    cred_store.get_secret(NVIDIA_API_KEY_NAME)
+
+    cred_store
+        .get_secret(NVIDIA_API_KEY_NAME)
         .context("NVIDIA API key not found. Run bootstrap again.")
 }
 
@@ -132,8 +131,9 @@ pub fn get_google_api_key() -> Result<String> {
         "./data/credentials",
         &master_key,
     )?;
-    
-    cred_store.get_secret(GOOGLE_API_KEY_NAME)
+
+    cred_store
+        .get_secret(GOOGLE_API_KEY_NAME)
         .context("Google API key not found. Run bootstrap again.")
 }
 
@@ -143,7 +143,7 @@ pub fn delete_nvidia_api_key() -> Result<()> {
         "./data/credentials",
         &master_key,
     )?;
-    
+
     cred_store.delete_secret(NVIDIA_API_KEY_NAME)?;
     Ok(())
 }
@@ -154,14 +154,14 @@ pub fn delete_google_api_key() -> Result<()> {
         "./data/credentials",
         &master_key,
     )?;
-    
+
     cred_store.delete_secret(GOOGLE_API_KEY_NAME)?;
     Ok(())
 }
 
 fn get_or_create_master_key() -> Result<[u8; 32]> {
     let key_path = "./data/.master_key";
-    
+
     if std::path::Path::new(key_path).exists() {
         let key_bytes = std::fs::read(key_path)?;
         if key_bytes.len() != 32 {
@@ -203,7 +203,7 @@ fn bootstrap_antigravity() -> Result<Config> {
     println!("Run this command to authenticate:");
     println!("  cargo run --example basic_usage -p hypr-claw-antigravity");
     println!("\nOr manually add accounts to: {}", accounts_path);
-    
+
     anyhow::bail!("Antigravity authentication required. Please run the OAuth flow first.");
 }
 
@@ -231,7 +231,7 @@ fn bootstrap_gemini_cli() -> Result<Config> {
     println!("Run this command to authenticate:");
     println!("  cargo run --example basic_usage -p hypr-claw-antigravity");
     println!("\nOr manually add accounts to: {}", accounts_path);
-    
+
     anyhow::bail!("OAuth authentication required. Please run the OAuth flow first.");
 }
 

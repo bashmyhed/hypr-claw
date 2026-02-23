@@ -2,10 +2,10 @@
 
 use super::{OsError, OsResult};
 use std::path::Path;
+use sysinfo::System;
 use tokio::fs;
 use tokio::process::Command;
 use tokio::task;
-use sysinfo::System;
 
 /// Set wallpaper using swww
 pub async fn wallpaper_set(image_path: &str) -> OsResult<()> {
@@ -13,13 +13,13 @@ pub async fn wallpaper_set(image_path: &str) -> OsResult<()> {
         .args(&["img", image_path])
         .output()
         .await?;
-    
+
     if !output.status.success() {
         return Err(OsError::OperationFailed(
-            String::from_utf8_lossy(&output.stderr).to_string()
+            String::from_utf8_lossy(&output.stderr).to_string(),
         ));
     }
-    
+
     Ok(())
 }
 
@@ -76,29 +76,26 @@ pub async fn shutdown() -> OsResult<()> {
         .args(&["poweroff"])
         .output()
         .await?;
-    
+
     if !output.status.success() {
         return Err(OsError::OperationFailed(
-            String::from_utf8_lossy(&output.stderr).to_string()
+            String::from_utf8_lossy(&output.stderr).to_string(),
         ));
     }
-    
+
     Ok(())
 }
 
 /// Reboot system
 pub async fn reboot() -> OsResult<()> {
-    let output = Command::new("systemctl")
-        .args(&["reboot"])
-        .output()
-        .await?;
-    
+    let output = Command::new("systemctl").args(&["reboot"]).output().await?;
+
     if !output.status.success() {
         return Err(OsError::OperationFailed(
-            String::from_utf8_lossy(&output.stderr).to_string()
+            String::from_utf8_lossy(&output.stderr).to_string(),
         ));
     }
-    
+
     Ok(())
 }
 

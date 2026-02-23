@@ -2,11 +2,11 @@
 
 use crate::interfaces::RuntimeError;
 use crate::types::{LLMResponse, Message};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use parking_lot::Mutex;
 use tracing::{debug, warn};
 
 /// Request payload for LLM service.
@@ -26,8 +26,6 @@ struct OpenAIRequest {
     tools: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
 }
 
 /// OpenAI-compatible response format
@@ -134,7 +132,7 @@ impl LLMClient {
             .timeout(Duration::from_secs(60))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        
+
         Self {
             base_url,
             client,
@@ -153,7 +151,12 @@ impl LLMClient {
     }
 
     /// Create a new LLM client with API key and model.
-    pub fn with_api_key_and_model(base_url: String, max_retries: u32, api_key: String, model: String) -> Self {
+    pub fn with_api_key_and_model(
+        base_url: String,
+        max_retries: u32,
+        api_key: String,
+        model: String,
+    ) -> Self {
         let mut client = Self::new(base_url, max_retries);
         client.api_key = Some(api_key);
         client.model = Some(model);
@@ -182,19 +185,20 @@ impl LLMClient {
 
         // Check circuit breaker
         self.circuit_breaker.should_allow_request()?;
-        
+
         // CRITICAL: Validate tools are not empty
         if tool_schemas.is_empty() {
             return Err(RuntimeError::LLMError(
-                "Cannot call LLM with empty tool schemas. Agent must have tools registered.".to_string()
+                "Cannot call LLM with empty tool schemas. Agent must have tools registered."
+                    .to_string(),
             ));
         }
 
         let mut last_error = None;
-        
+
         for attempt in 0..=self.max_retries {
             debug!("LLM call attempt {}/{}", attempt + 1, self.max_retries + 1);
-            
+
             match self.call_once(system_prompt, messages, tool_schemas).await {
                 Ok(response) => {
                     self.circuit_breaker.record_success();
@@ -209,13 +213,15 @@ impl LLMClient {
                 }
             }
         }
-        
+
         self.circuit_breaker.record_failure();
-        
+
         Err(RuntimeError::LLMError(format!(
             "LLM call failed after {} attempts: {}",
             self.max_retries + 1,
-            last_error.map(|e| e.to_string()).unwrap_or_else(|| "Unknown error".to_string())
+            last_error
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "Unknown error".to_string())
         )))
     }
 
@@ -226,14 +232,15 @@ impl LLMClient {
         tool_schemas: &[serde_json::Value],
     ) -> Result<LLMResponse, RuntimeError> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        
+
         let mut req_builder = self.client.post(&url);
 
         // Use OpenAI format if model is specified (NVIDIA/Google), otherwise use custom format
         if let Some(model) = &self.model {
             // Convert to OpenAI format
             let mut openai_messages = Vec::new();
-            
+            let mut last_tool_call_id: Option<String> = None;
+
             // Add system message if present
             if !system_prompt.is_empty() {
                 openai_messages.push(serde_json::json!({
@@ -241,7 +248,7 @@ impl LLMClient {
                     "content": system_prompt
                 }));
             }
-            
+
             // Add conversation messages
             for msg in messages {
                 let role_str = match msg.role {
@@ -250,32 +257,79 @@ impl LLMClient {
                     crate::types::Role::Tool => "tool",
                     crate::types::Role::System => "system",
                 };
-                
-                // For tool messages, serialize content as JSON string
-                let content_value = if matches!(msg.role, crate::types::Role::Tool) {
-                    serde_json::Value::String(msg.content.to_string())
+
+                // Encode tool call turns in strict OpenAI format for provider compatibility.
+                if matches!(msg.role, crate::types::Role::Assistant)
+                    && msg
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.get("tool_call"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                {
+                    let tool_name = msg
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.get("tool_name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown_tool");
+                    let tool_input = msg
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.get("input"))
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    let call_id = format!("call_{}", openai_messages.len());
+                    last_tool_call_id = Some(call_id.clone());
+                    openai_messages.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": serde_json::Value::Null,
+                        "tool_calls": [{
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": tool_name,
+                                "arguments": serde_json::to_string(&tool_input).unwrap_or_else(|_| "{}".to_string())
+                            }
+                        }]
+                    }));
+                    continue;
+                }
+
+                if matches!(msg.role, crate::types::Role::Tool) {
+                    let tool_call_id = last_tool_call_id
+                        .clone()
+                        .unwrap_or_else(|| "call_0".to_string());
+                    openai_messages.push(serde_json::json!({
+                        "role": role_str,
+                        "tool_call_id": tool_call_id,
+                        "content": msg.content.to_string()
+                    }));
+                    continue;
+                }
+
+                let content_value = if let Some(s) = msg.content.as_str() {
+                    serde_json::Value::String(s.to_string())
                 } else {
-                    msg.content.clone()
+                    serde_json::Value::String(msg.content.to_string())
                 };
-                
                 openai_messages.push(serde_json::json!({
                     "role": role_str,
                     "content": content_value
                 }));
             }
-            
+
             let openai_request = OpenAIRequest {
                 model: model.clone(),
                 messages: openai_messages,
                 tools: Some(tool_schemas.to_vec()),
                 tool_choice: Some("auto".to_string()),
-                max_tokens: Some(2048),
             };
-            
+
             debug!("llm url={}", url);
             debug!("llm api_key_present={}", self.api_key.is_some());
             debug!("llm tools_count={}", tool_schemas.len());
-            
+
             req_builder = req_builder.json(&openai_request);
         } else {
             // Use custom format for local/Python service
@@ -284,10 +338,10 @@ impl LLMClient {
                 messages: messages.to_vec(),
                 tools: tool_schemas.to_vec(),
             };
-            
+
             debug!("llm url={}", url);
             debug!("llm tools_count={}", tool_schemas.len());
-            
+
             req_builder = req_builder.json(&request);
         }
 
@@ -296,28 +350,34 @@ impl LLMClient {
             req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
         }
 
-        let response = req_builder
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_connect() || e.is_timeout() {
-                    RuntimeError::LLMError("Network connection failed".to_string())
-                } else {
-                    RuntimeError::LLMError(format!("HTTP request failed: {}", e))
-                }
-            })?;
-        
+        let response = req_builder.send().await.map_err(|e| {
+            if e.is_connect() || e.is_timeout() {
+                RuntimeError::LLMError("Network connection failed".to_string())
+            } else {
+                RuntimeError::LLMError(format!("HTTP request failed: {}", e))
+            }
+        })?;
+
         let status = response.status();
         if !status.is_success() {
             // Try to get error details from response body
-            let error_body = response.text().await.unwrap_or_else(|_| "Unable to read error response".to_string());
-            
+            let error_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unable to read error response".to_string());
+
             let error_msg = match status.as_u16() {
                 401 => {
                     if self.api_key.is_some() {
-                        format!("Authentication failed. Check your API key. Details: {}", error_body)
+                        format!(
+                            "Authentication failed. Check your API key. Details: {}",
+                            error_body
+                        )
                     } else {
-                        format!("Authentication required (401 Unauthorized). Details: {}", error_body)
+                        format!(
+                            "Authentication required (401 Unauthorized). Details: {}",
+                            error_body
+                        )
                     }
                 }
                 404 => format!("Invalid endpoint (404 Not Found). Details: {}", error_body),
@@ -325,7 +385,10 @@ impl LLMClient {
                     if self.api_key.is_some() {
                         format!("Rate limit exceeded. Details: {}", error_body)
                     } else {
-                        format!("Rate limit exceeded (429 Too Many Requests). Details: {}", error_body)
+                        format!(
+                            "Rate limit exceeded (429 Too Many Requests). Details: {}",
+                            error_body
+                        )
                     }
                 }
                 500..=599 => {
@@ -339,23 +402,29 @@ impl LLMClient {
             };
             return Err(RuntimeError::LLMError(error_msg));
         }
-        
-        let llm_response: LLMResponse = if self.model.is_some() {
-            // Parse OpenAI format response
-            let openai_response: OpenAIResponse = response
-                .json()
-                .await
-                .map_err(|e| RuntimeError::LLMError(format!("Failed to parse response: {}", e)))?;
-            
-            // Convert to our format
-            if let Some(choice) = openai_response.choices.first() {
-                if let Some(tool_calls) = &choice.message.tool_calls {
-                    if let Some(tool_call) = tool_calls.first() {
-                        LLMResponse::ToolCall {
-                            schema_version: crate::types::SCHEMA_VERSION,
-                            tool_name: tool_call.function.name.clone(),
-                            input: serde_json::from_str(&tool_call.function.arguments)
-                                .unwrap_or(serde_json::json!({})),
+
+        let llm_response: LLMResponse =
+            if self.model.is_some() {
+                // Parse OpenAI format response
+                let openai_response: OpenAIResponse = response.json().await.map_err(|e| {
+                    RuntimeError::LLMError(format!("Failed to parse response: {}", e))
+                })?;
+
+                // Convert to our format
+                if let Some(choice) = openai_response.choices.first() {
+                    if let Some(tool_calls) = &choice.message.tool_calls {
+                        if let Some(tool_call) = tool_calls.first() {
+                            LLMResponse::ToolCall {
+                                schema_version: crate::types::SCHEMA_VERSION,
+                                tool_name: tool_call.function.name.clone(),
+                                input: serde_json::from_str(&tool_call.function.arguments)
+                                    .unwrap_or(serde_json::json!({})),
+                            }
+                        } else {
+                            LLMResponse::Final {
+                                schema_version: crate::types::SCHEMA_VERSION,
+                                content: choice.message.content.clone().unwrap_or_default(),
+                            }
                         }
                     } else {
                         LLMResponse::Final {
@@ -364,24 +433,17 @@ impl LLMClient {
                         }
                     }
                 } else {
-                    LLMResponse::Final {
-                        schema_version: crate::types::SCHEMA_VERSION,
-                        content: choice.message.content.clone().unwrap_or_default(),
-                    }
+                    return Err(RuntimeError::LLMError("No choices in response".to_string()));
                 }
             } else {
-                return Err(RuntimeError::LLMError("No choices in response".to_string()));
-            }
-        } else {
-            // Parse custom format response
-            response
-                .json()
-                .await
-                .map_err(|e| RuntimeError::LLMError(format!("Failed to parse response: {}", e)))?
-        };
-        
+                // Parse custom format response
+                response.json().await.map_err(|e| {
+                    RuntimeError::LLMError(format!("Failed to parse response: {}", e))
+                })?
+            };
+
         self.validate_response(&llm_response)?;
-        
+
         Ok(llm_response)
     }
 
@@ -419,7 +481,7 @@ mod tests {
     #[test]
     fn test_validate_final_response() {
         let client = LLMClient::new("http://localhost:8000".to_string(), 1);
-        
+
         let response = LLMResponse::Final {
             schema_version: crate::types::SCHEMA_VERSION,
             content: "Hello".to_string(),
@@ -430,7 +492,7 @@ mod tests {
     #[test]
     fn test_validate_empty_final_response() {
         let client = LLMClient::new("http://localhost:8000".to_string(), 1);
-        
+
         let response = LLMResponse::Final {
             schema_version: crate::types::SCHEMA_VERSION,
             content: "".to_string(),
@@ -448,7 +510,7 @@ mod tests {
     #[test]
     fn test_validate_tool_call_response() {
         let client = LLMClient::new("http://localhost:8000".to_string(), 1);
-        
+
         let response = LLMResponse::ToolCall {
             schema_version: crate::types::SCHEMA_VERSION,
             tool_name: "search".to_string(),
@@ -460,7 +522,7 @@ mod tests {
     #[test]
     fn test_validate_empty_tool_name() {
         let client = LLMClient::new("http://localhost:8000".to_string(), 1);
-        
+
         let response = LLMResponse::ToolCall {
             schema_version: crate::types::SCHEMA_VERSION,
             tool_name: "".to_string(),
@@ -504,7 +566,7 @@ mod tests {
                 }
             })],
         };
-        
+
         let serialized = serde_json::to_string(&request).unwrap();
         assert!(serialized.contains("system_prompt"));
         assert!(serialized.contains("messages"));

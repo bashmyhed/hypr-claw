@@ -50,13 +50,13 @@ pub async fn workspace_switch(id: u32) -> OsResult<()> {
         .args(&["dispatch", "workspace", &id.to_string()])
         .output()
         .await?;
-    
+
     if !output.status.success() {
         return Err(OsError::OperationFailed(
-            String::from_utf8_lossy(&output.stderr).to_string()
+            String::from_utf8_lossy(&output.stderr).to_string(),
         ));
     }
-    
+
     Ok(())
 }
 
@@ -65,16 +65,20 @@ pub async fn workspace_move_window(window_id: &str, workspace_id: u32) -> OsResu
     validate_workspace_id(workspace_id)?;
     validate_window_selector(window_id)?;
     let output = Command::new("hyprctl")
-        .args(&["dispatch", "movetoworkspace", &format!("{},{}", workspace_id, window_id)])
+        .args(&[
+            "dispatch",
+            "movetoworkspace",
+            &format!("{},{}", workspace_id, window_id),
+        ])
         .output()
         .await?;
-    
+
     if !output.status.success() {
         return Err(OsError::OperationFailed(
-            String::from_utf8_lossy(&output.stderr).to_string()
+            String::from_utf8_lossy(&output.stderr).to_string(),
         ));
     }
-    
+
     Ok(())
 }
 
@@ -85,13 +89,13 @@ pub async fn window_focus(window_id: &str) -> OsResult<()> {
         .args(&["dispatch", "focuswindow", window_id])
         .output()
         .await?;
-    
+
     if !output.status.success() {
         return Err(OsError::OperationFailed(
-            String::from_utf8_lossy(&output.stderr).to_string()
+            String::from_utf8_lossy(&output.stderr).to_string(),
         ));
     }
-    
+
     Ok(())
 }
 
@@ -102,13 +106,13 @@ pub async fn window_close(window_id: &str) -> OsResult<()> {
         .args(&["dispatch", "closewindow", window_id])
         .output()
         .await?;
-    
+
     if !output.status.success() {
         return Err(OsError::OperationFailed(
-            String::from_utf8_lossy(&output.stderr).to_string()
+            String::from_utf8_lossy(&output.stderr).to_string(),
         ));
     }
-    
+
     Ok(())
 }
 
@@ -119,13 +123,13 @@ pub async fn exec(command: &str) -> OsResult<()> {
         .args(&["dispatch", "exec", command])
         .output()
         .await?;
-    
+
     if !output.status.success() {
         return Err(OsError::OperationFailed(
-            String::from_utf8_lossy(&output.stderr).to_string()
+            String::from_utf8_lossy(&output.stderr).to_string(),
         ));
     }
-    
+
     Ok(())
 }
 
@@ -140,18 +144,19 @@ pub async fn get_active_workspace() -> OsResult<u32> {
         .args(&["activeworkspace", "-j"])
         .output()
         .await?;
-    
+
     if !output.status.success() {
         return Err(OsError::OperationFailed(
-            String::from_utf8_lossy(&output.stderr).to_string()
+            String::from_utf8_lossy(&output.stderr).to_string(),
         ));
     }
-    
+
     let json: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| OsError::OperationFailed(e.to_string()))?;
-    
-    let id = json["id"].as_u64()
+
+    let id = json["id"]
+        .as_u64()
         .ok_or_else(|| OsError::OperationFailed("Invalid workspace ID".to_string()))?;
-    
+
     Ok(id as u32)
 }
