@@ -32,7 +32,7 @@ impl CodexProvider {
 
     pub async fn authenticate(&self) -> Result<OAuthTokens, Box<dyn std::error::Error>> {
         println!("\n[Codex] Starting OAuth authentication...");
-        
+
         let pkce = generate_pkce();
         let state = generate_state();
         let auth_url = build_authorization_url(&pkce, &state);
@@ -67,7 +67,7 @@ impl CodexProvider {
 
     async fn ensure_valid_token(&self) -> Result<(), Box<dyn std::error::Error>> {
         let tokens = self.tokens.read().await;
-        
+
         if let Some(tokens) = tokens.as_ref() {
             if is_token_expired(tokens) {
                 let refresh_token = tokens.refresh_token.clone();
@@ -94,7 +94,9 @@ impl CodexProvider {
             .map_err(|e| ProviderError::Api(e.to_string()))?;
 
         let tokens = self.tokens.read().await;
-        let tokens = tokens.as_ref().ok_or_else(|| ProviderError::Api("No tokens".to_string()))?;
+        let tokens = tokens
+            .as_ref()
+            .ok_or_else(|| ProviderError::Api("No tokens".to_string()))?;
 
         let request_body = build_codex_request(messages, tools, &self.model);
 
@@ -119,28 +121,42 @@ impl CodexProvider {
         }
 
         // Parse SSE stream - look for response.done event
-        let text = response.text().await.map_err(|e| ProviderError::Parse(e.to_string()))?;
-        
+        let text = response
+            .text()
+            .await
+            .map_err(|e| ProviderError::Parse(e.to_string()))?;
+
         for line in text.lines() {
             if line.starts_with("data: ") {
                 let data = &line[6..];
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
                     let event_type = event.get("type").and_then(|t| t.as_str());
-                    
+
                     // Look for response.done or response.completed
-                    if event_type == Some("response.done") || event_type == Some("response.completed") {
+                    if event_type == Some("response.done")
+                        || event_type == Some("response.completed")
+                    {
                         if let Some(response_obj) = event.get("response") {
                             // Extract content from output array
-                            if let Some(output) = response_obj.get("output").and_then(|o| o.as_array()) {
+                            if let Some(output) =
+                                response_obj.get("output").and_then(|o| o.as_array())
+                            {
                                 let mut content = String::new();
-                                
+
                                 for item in output {
-                                    if let Some(item_type) = item.get("type").and_then(|t| t.as_str()) {
+                                    if let Some(item_type) =
+                                        item.get("type").and_then(|t| t.as_str())
+                                    {
                                         if item_type == "message" {
                                             // Extract text content
-                                            if let Some(content_array) = item.get("content").and_then(|c| c.as_array()) {
+                                            if let Some(content_array) =
+                                                item.get("content").and_then(|c| c.as_array())
+                                            {
                                                 for content_item in content_array {
-                                                    if let Some(text) = content_item.get("text").and_then(|t| t.as_str()) {
+                                                    if let Some(text) = content_item
+                                                        .get("text")
+                                                        .and_then(|t| t.as_str())
+                                                    {
                                                         content.push_str(text);
                                                     }
                                                 }
@@ -148,7 +164,7 @@ impl CodexProvider {
                                         }
                                     }
                                 }
-                                
+
                                 if !content.is_empty() {
                                     return Ok(GenerateResponse {
                                         content: Some(content),
@@ -163,7 +179,9 @@ impl CodexProvider {
             }
         }
 
-        Err(ProviderError::Parse("No response.done event found".to_string()))
+        Err(ProviderError::Parse(
+            "No response.done event found".to_string(),
+        ))
     }
 }
 

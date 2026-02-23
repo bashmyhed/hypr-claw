@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use sysinfo::{System, Disks};
 use std::env;
+use sysinfo::{Disks, System};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvironmentSnapshot {

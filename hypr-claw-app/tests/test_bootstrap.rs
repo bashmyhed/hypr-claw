@@ -19,10 +19,12 @@ fn test_bootstrap_nvidia_credential_storage() {
     // Verify encrypted at rest
     let files: Vec<_> = fs::read_dir(test_dir).unwrap().collect();
     assert_eq!(files.len(), 1);
-    
+
     let file_content = fs::read(files[0].as_ref().unwrap().path()).unwrap();
     let api_key_bytes = api_key.as_bytes();
-    assert!(!file_content.windows(api_key_bytes.len()).any(|w| w == api_key_bytes));
+    assert!(!file_content
+        .windows(api_key_bytes.len())
+        .any(|w| w == api_key_bytes));
 
     fs::remove_dir_all(test_dir).unwrap();
 }
@@ -71,7 +73,9 @@ fn test_config_reset() {
     let master_key = [42u8; 32];
     let store = CredentialStore::new(test_dir, &master_key).unwrap();
 
-    store.store_secret("llm/nvidia_api_key", "test-key").unwrap();
+    store
+        .store_secret("llm/nvidia_api_key", "test-key")
+        .unwrap();
     assert!(store.get_secret("llm/nvidia_api_key").is_ok());
 
     store.delete_secret("llm/nvidia_api_key").unwrap();

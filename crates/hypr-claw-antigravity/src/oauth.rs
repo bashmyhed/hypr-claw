@@ -148,7 +148,10 @@ pub async fn exchange_antigravity(code: &str, state: &str) -> Result<TokenExchan
     // Get user info
     let user_info = client
         .get("https://www.googleapis.com/oauth2/v1/userinfo?alt=json")
-        .header("Authorization", format!("Bearer {}", token_response.access_token))
+        .header(
+            "Authorization",
+            format!("Bearer {}", token_response.access_token),
+        )
         .header("User-Agent", "google-api-nodejs-client/9.15.1")
         .send()
         .await?

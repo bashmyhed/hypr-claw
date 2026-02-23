@@ -7,20 +7,64 @@ use tokio::fs;
 use tokio::process::Command;
 use tokio::task;
 
-/// Set wallpaper using swww
-pub async fn wallpaper_set(image_path: &str) -> OsResult<()> {
-    let output = Command::new("swww")
-        .args(&["img", image_path])
+async fn command_exists(command: &str) -> bool {
+    Command::new("which")
+        .arg(command)
         .output()
-        .await?;
+        .await
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
 
-    if !output.status.success() {
-        return Err(OsError::OperationFailed(
-            String::from_utf8_lossy(&output.stderr).to_string(),
-        ));
+async fn run_checked(command: &str, args: &[&str]) -> OsResult<()> {
+    let output = Command::new(command).args(args).output().await?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(OsError::OperationFailed(
+        String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    ))
+}
+
+/// Set wallpaper using any available backend.
+pub async fn wallpaper_set(image_path: &str) -> OsResult<()> {
+    if !Path::new(image_path).exists() {
+        return Err(OsError::NotFound(image_path.to_string()));
     }
 
-    Ok(())
+    if command_exists("swww").await && run_checked("swww", &["img", image_path]).await.is_ok() {
+        return Ok(());
+    }
+
+    if command_exists("hyprctl").await {
+        let preload = run_checked("hyprctl", &["hyprpaper", "preload", image_path]).await;
+        let wallpaper_arg = format!(",{image_path}");
+        let set_wallpaper = run_checked(
+            "hyprctl",
+            &["hyprpaper", "wallpaper", wallpaper_arg.as_str()],
+        )
+        .await;
+        if preload.is_ok() && set_wallpaper.is_ok() {
+            return Ok(());
+        }
+    }
+
+    if command_exists("caelestia").await {
+        if run_checked("caelestia", &["wallpaper", "-f", image_path])
+            .await
+            .is_ok()
+            || run_checked("caelestia", &["wallpaper", "-h", image_path])
+                .await
+                .is_ok()
+        {
+            return Ok(());
+        }
+    }
+
+    Err(OsError::OperationFailed(
+        "No wallpaper backend succeeded (tried: swww, hyprpaper via hyprctl, caelestia)"
+            .to_string(),
+    ))
 }
 
 /// Get battery level

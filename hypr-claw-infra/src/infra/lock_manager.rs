@@ -1,4 +1,4 @@
-use parking_lot::{Mutex, Condvar};
+use parking_lot::{Condvar, Mutex};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -36,7 +36,7 @@ impl LockManager {
 
     pub fn acquire(&self, session_key: &str) -> Result<SessionLock, LockError> {
         let start = Instant::now();
-        
+
         let lock_state_arc = {
             let mut locks = self.locks.lock();
             locks
@@ -52,22 +52,22 @@ impl LockManager {
 
         let mut state = lock_state_arc.lock();
         let deadline = start + self.timeout;
-        
+
         while state.locked {
             let now = Instant::now();
             if now >= deadline {
                 return Err(LockError::Timeout(session_key.to_string()));
             }
-            
+
             let remaining = deadline - now;
             let condvar = Arc::clone(&state.condvar);
             let result = condvar.wait_for(&mut state, remaining);
-            
+
             if result.timed_out() && state.locked {
                 return Err(LockError::Timeout(session_key.to_string()));
             }
         }
-        
+
         state.locked = true;
         let wait_time = start.elapsed();
         drop(state);
@@ -79,16 +79,19 @@ impl LockManager {
         })
     }
 
-    pub fn acquire_with_metrics(&self, session_key: &str) -> (Result<SessionLock, LockError>, LockMetrics) {
+    pub fn acquire_with_metrics(
+        &self,
+        session_key: &str,
+    ) -> (Result<SessionLock, LockError>, LockMetrics) {
         let start = Instant::now();
         let result = self.acquire(session_key);
         let wait_time = start.elapsed();
-        
+
         let metrics = LockMetrics {
             wait_time,
             acquired: result.is_ok(),
         };
-        
+
         (result, metrics)
     }
 }
@@ -103,7 +106,7 @@ impl SessionLock {
     pub fn wait_time(&self) -> Duration {
         self.wait_time
     }
-    
+
     pub fn session_key(&self) -> &str {
         &self.session_key
     }

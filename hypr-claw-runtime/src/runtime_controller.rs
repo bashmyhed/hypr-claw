@@ -74,11 +74,10 @@ where
         user_message: &str,
     ) -> Result<String, RuntimeError> {
         // Acquire concurrency permit
-        let _permit = self
-            .concurrency_limiter
-            .acquire()
-            .await
-            .map_err(|e| RuntimeError::SessionError(format!("Concurrency limit error: {}", e)))?;
+        let _permit =
+            self.concurrency_limiter.acquire().await.map_err(|e| {
+                RuntimeError::SessionError(format!("Concurrency limit error: {}", e))
+            })?;
 
         // Resolve session
         info!("Processing request: user={}, agent={}", user_id, agent_id);
@@ -92,14 +91,22 @@ where
         // Execute agent loop
         let response = self
             .agent_loop
-            .run(&session_key, &agent_config.id, &agent_config.soul, user_message)
+            .run(
+                &session_key,
+                &agent_config.id,
+                &agent_config.soul,
+                user_message,
+            )
             .await
             .map_err(|e| {
                 error!("Runtime execution failed: {}", e);
                 RuntimeError::LLMError(format!("Runtime execution failed: {}", e))
             })?;
 
-        info!("Request completed successfully for session: {}", session_key);
+        info!(
+            "Request completed successfully for session: {}",
+            session_key
+        );
         Ok(response)
     }
 }
@@ -108,10 +115,10 @@ where
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use crate::compactor::Compactor;
-    use crate::{LLMClient, LLMClientType};
     use crate::types::Message;
+    use crate::{LLMClient, LLMClientType};
+    use async_trait::async_trait;
     use serde_json::json;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -131,7 +138,6 @@ mod tests {
     }
 
     #[async_trait]
-
 
     impl SessionStore for MockSessionStore {
         async fn load(&self, session_key: &str) -> Result<Vec<Message>, RuntimeError> {
@@ -159,7 +165,6 @@ mod tests {
     }
 
     #[async_trait]
-
 
     impl LockManager for MockLockManager {
         async fn acquire(&self, session_key: &str) -> Result<(), RuntimeError> {
@@ -202,22 +207,20 @@ mod tests {
         }
 
         fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
-            vec![
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": "echo",
-                        "description": "Echo a message",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "message": {"type": "string"}
-                            },
-                            "required": ["message"]
-                        }
+            vec![json!({
+                "type": "function",
+                "function": {
+                    "name": "echo",
+                    "description": "Echo a message",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "message": {"type": "string"}
+                        },
+                        "required": ["message"]
                     }
-                })
-            ]
+                }
+            })]
         }
     }
 
@@ -236,20 +239,16 @@ mod tests {
         let lock_mgr = Arc::new(MockLockManager::new());
         let dispatcher = Arc::new(MockToolDispatcher);
         let registry = Arc::new(MockToolRegistry);
-        let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
+        let llm_client =
+            LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
         let compactor = Compactor::new(10000, MockSummarizer);
 
         let agent_loop = AgentLoop::new(
-            store,
-            lock_mgr,
-            dispatcher,
-            registry,
-            llm_client,
-            compactor,
-            10,
+            store, lock_mgr, dispatcher, registry, llm_client, compactor, 10,
         );
 
-        let controller = RuntimeController::new(agent_loop, temp_dir.path().to_str().unwrap().to_string());
+        let controller =
+            RuntimeController::new(agent_loop, temp_dir.path().to_str().unwrap().to_string());
 
         let result = controller.execute("user1", "nonexistent_agent", "Hi").await;
         assert!(result.is_err());
@@ -268,20 +267,16 @@ mod tests {
         let lock_mgr = Arc::new(MockLockManager::new());
         let dispatcher = Arc::new(MockToolDispatcher);
         let registry = Arc::new(MockToolRegistry);
-        let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
+        let llm_client =
+            LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
         let compactor = Compactor::new(10000, MockSummarizer);
 
         let agent_loop = AgentLoop::new(
-            store,
-            lock_mgr,
-            dispatcher,
-            registry,
-            llm_client,
-            compactor,
-            10,
+            store, lock_mgr, dispatcher, registry, llm_client, compactor, 10,
         );
 
-        let controller = RuntimeController::new(agent_loop, temp_dir.path().to_str().unwrap().to_string());
+        let controller =
+            RuntimeController::new(agent_loop, temp_dir.path().to_str().unwrap().to_string());
 
         let result = controller.execute("", "agent", "Hi").await;
         assert!(result.is_err());
@@ -300,20 +295,16 @@ mod tests {
         let lock_mgr = Arc::new(MockLockManager::new());
         let dispatcher = Arc::new(MockToolDispatcher);
         let registry = Arc::new(MockToolRegistry);
-        let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
+        let llm_client =
+            LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
         let compactor = Compactor::new(10000, MockSummarizer);
 
         let agent_loop = AgentLoop::new(
-            store,
-            lock_mgr,
-            dispatcher,
-            registry,
-            llm_client,
-            compactor,
-            10,
+            store, lock_mgr, dispatcher, registry, llm_client, compactor, 10,
         );
 
-        let controller = RuntimeController::new(agent_loop, temp_dir.path().to_str().unwrap().to_string());
+        let controller =
+            RuntimeController::new(agent_loop, temp_dir.path().to_str().unwrap().to_string());
 
         let result = controller.execute("user1", "", "Hi").await;
         assert!(result.is_err());
@@ -331,17 +322,12 @@ mod tests {
         let lock_mgr = Arc::new(MockLockManager::new());
         let dispatcher = Arc::new(MockToolDispatcher);
         let registry = Arc::new(MockToolRegistry);
-        let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
+        let llm_client =
+            LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
         let compactor = Compactor::new(10000, MockSummarizer);
 
         let agent_loop = AgentLoop::new(
-            store,
-            lock_mgr,
-            dispatcher,
-            registry,
-            llm_client,
-            compactor,
-            10,
+            store, lock_mgr, dispatcher, registry, llm_client, compactor, 10,
         );
 
         let controller = RuntimeController::new(agent_loop, "/tmp/agents".to_string());

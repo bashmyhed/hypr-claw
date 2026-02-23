@@ -51,10 +51,12 @@ impl ModelResolver {
         let explicit_quota = is_antigravity || is_image_model;
 
         let is_gemini3 = base_name.starts_with("gemini-3");
-        let is_gemini3_pro = base_name.starts_with("gemini-3-pro") || base_name.starts_with("gemini-3.1-pro");
+        let is_gemini3_pro =
+            base_name.starts_with("gemini-3-pro") || base_name.starts_with("gemini-3.1-pro");
 
         // Apply model aliases
-        let actual_model = if is_antigravity && is_gemini3_pro && tier.is_none() && !is_image_model {
+        let actual_model = if is_antigravity && is_gemini3_pro && tier.is_none() && !is_image_model
+        {
             format!("{}-low", base_name)
         } else {
             Self::apply_alias(&base_name)

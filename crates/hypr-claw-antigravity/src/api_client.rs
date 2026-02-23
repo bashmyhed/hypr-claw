@@ -86,8 +86,15 @@ impl AntigravityClient {
         })
     }
 
-    pub async fn add_account(&mut self, email: Option<String>, refresh: String, project_id: String) -> Result<()> {
-        self.account_manager.add_account(email, refresh, project_id).await
+    pub async fn add_account(
+        &mut self,
+        email: Option<String>,
+        refresh: String,
+        project_id: String,
+    ) -> Result<()> {
+        self.account_manager
+            .add_account(email, refresh, project_id)
+            .await
     }
 
     pub fn account_count(&self) -> usize {
@@ -115,18 +122,28 @@ impl AntigravityClient {
 
         // Update model name
         if let Some(obj) = body.as_object_mut() {
-            obj.insert("model".to_string(), Value::String(resolved.actual_model.clone()));
+            obj.insert(
+                "model".to_string(),
+                Value::String(resolved.actual_model.clone()),
+            );
         }
 
         // Add thinking configuration
-        add_thinking_config(&mut body, resolved.thinking_budget, resolved.thinking_level.as_deref());
+        add_thinking_config(
+            &mut body,
+            resolved.thinking_budget,
+            resolved.thinking_level.as_deref(),
+        );
 
         // Transform tools
         transform_tools(&mut body);
 
         // Build headers
         let mut headers = build_fingerprint_headers(fingerprint);
-        headers.push(("Authorization".to_string(), format!("Bearer {}", access_token)));
+        headers.push((
+            "Authorization".to_string(),
+            format!("Bearer {}", access_token),
+        ));
         headers.push(("Content-Type".to_string(), "application/json".to_string()));
 
         // Build URL
@@ -143,7 +160,9 @@ impl AntigravityClient {
         // Handle rate limiting
         if response.status().as_u16() == 429 {
             let quota_key = ModelResolver::get_model_family(&resolved.actual_model);
-            self.account_manager.mark_rate_limited(quota_key, 60_000).await?;
+            self.account_manager
+                .mark_rate_limited(quota_key, 60_000)
+                .await?;
             anyhow::bail!("Rate limited, rotated to next account");
         }
 

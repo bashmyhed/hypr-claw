@@ -1,9 +1,11 @@
-use crate::interfaces::{RuntimeError, SessionStore as SessionStoreTrait, LockManager as LockManagerTrait};
+use crate::interfaces::{
+    LockManager as LockManagerTrait, RuntimeError, SessionStore as SessionStoreTrait,
+};
 use crate::types::Message;
-use std::sync::Arc;
+use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use async_trait::async_trait;
+use std::sync::Arc;
 
 /// Async wrapper for sync SessionStore
 pub struct AsyncSessionStore {
@@ -21,11 +23,13 @@ impl SessionStoreTrait for AsyncSessionStore {
     async fn load(&self, session_key: &str) -> Result<Vec<Message>, RuntimeError> {
         let inner = self.inner.clone();
         let key = session_key.to_string();
-        
+
         tokio::task::spawn_blocking(move || {
-            inner.load(&key)
+            inner
+                .load(&key)
                 .map(|values| {
-                    values.into_iter()
+                    values
+                        .into_iter()
                         .filter_map(|v| serde_json::from_value(v).ok())
                         .collect()
                 })
@@ -38,12 +42,14 @@ impl SessionStoreTrait for AsyncSessionStore {
     async fn save(&self, session_key: &str, messages: &[Message]) -> Result<(), RuntimeError> {
         let inner = self.inner.clone();
         let key = session_key.to_string();
-        let msgs: Vec<serde_json::Value> = messages.iter()
+        let msgs: Vec<serde_json::Value> = messages
+            .iter()
             .filter_map(|m| serde_json::to_value(m).ok())
             .collect();
-        
+
         tokio::task::spawn_blocking(move || {
-            inner.save(&key, &msgs)
+            inner
+                .save(&key, &msgs)
                 .map_err(|e| RuntimeError::SessionError(e.to_string()))
         })
         .await
@@ -71,9 +77,10 @@ impl LockManagerTrait for AsyncLockManager {
     async fn acquire(&self, session_key: &str) -> Result<(), RuntimeError> {
         let inner = self.inner.clone();
         let key = session_key.to_string();
-        
+
         let lock = tokio::task::spawn_blocking(move || {
-            inner.acquire(&key)
+            inner
+                .acquire(&key)
                 .map_err(|e| RuntimeError::LockError(e.to_string()))
         })
         .await
@@ -87,4 +94,3 @@ impl LockManagerTrait for AsyncLockManager {
         self.locks.lock().remove(session_key);
     }
 }
-

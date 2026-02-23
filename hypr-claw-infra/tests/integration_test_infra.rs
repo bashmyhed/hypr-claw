@@ -1,5 +1,7 @@
 use hypr_claw::infra::audit_logger::AuditLogger;
-use hypr_claw::infra::contracts::{AuditEntry, PermissionDecision, PermissionLevel, PermissionRequest};
+use hypr_claw::infra::contracts::{
+    AuditEntry, PermissionDecision, PermissionLevel, PermissionRequest,
+};
 use hypr_claw::infra::lock_manager::LockManager;
 use hypr_claw::infra::permission_engine::PermissionEngine;
 use hypr_claw::infra::session_store::SessionStore;
@@ -13,7 +15,7 @@ use tempfile::TempDir;
 #[test]
 fn test_full_session_workflow() {
     let temp = TempDir::new().unwrap();
-    
+
     // Initialize infrastructure
     let session_store = Arc::new(SessionStore::new(temp.path().join("sessions")).unwrap());
     let lock_manager = Arc::new(LockManager::new(Duration::from_secs(5)));
@@ -28,7 +30,7 @@ fn test_full_session_workflow() {
     // Check permission
     let mut input = HashMap::new();
     input.insert("file".to_string(), json!("/tmp/test.txt"));
-    
+
     let perm_request = PermissionRequest {
         session_key: session_key.to_string(),
         tool_name: "read_file".to_string(),
@@ -62,7 +64,7 @@ fn test_full_session_workflow() {
 #[test]
 fn test_concurrent_sessions() {
     let temp = TempDir::new().unwrap();
-    
+
     let session_store = Arc::new(SessionStore::new(temp.path().join("sessions")).unwrap());
     let lock_manager = Arc::new(LockManager::new(Duration::from_secs(5)));
     let permission_engine = Arc::new(PermissionEngine::new());
@@ -76,7 +78,7 @@ fn test_concurrent_sessions() {
 
         let handle = thread::spawn(move || {
             let session_key = format!("session{}", i);
-            
+
             let _lock = locks.acquire(&session_key).unwrap();
 
             let mut input = HashMap::new();
@@ -112,7 +114,7 @@ fn test_concurrent_sessions() {
 #[test]
 fn test_permission_blocks_dangerous_operation() {
     let temp = TempDir::new().unwrap();
-    
+
     let permission_engine = PermissionEngine::new();
     let audit_logger = AuditLogger::new(temp.path().join("audit.log")).unwrap();
 
@@ -144,9 +146,9 @@ fn test_permission_blocks_dangerous_operation() {
 #[test]
 fn test_lock_prevents_concurrent_session_access() {
     let lock_manager = Arc::new(LockManager::new(Duration::from_millis(100)));
-    
+
     let lock1 = lock_manager.acquire("session1").unwrap();
-    
+
     let manager_clone = Arc::clone(&lock_manager);
     let handle = thread::spawn(move || {
         let result = manager_clone.acquire("session1");

@@ -2,27 +2,27 @@
 //!
 //! A production-grade agent runtime kernel implementing deterministic control flow.
 
-pub mod types;
-pub mod interfaces;
-pub mod gateway;
 pub mod agent_config;
+pub mod agent_loop;
+pub mod async_adapters;
+pub mod codex_adapter;
+pub mod compactor;
+pub mod gateway;
+pub mod interfaces;
 pub mod llm_client;
 pub mod llm_client_type;
-pub mod compactor;
-pub mod agent_loop;
-pub mod runtime_controller;
-pub mod async_adapters;
 pub mod metrics;
-pub mod codex_adapter;
+pub mod runtime_controller;
+pub mod types;
 
-pub use types::{LLMResponse, Message, Role, SCHEMA_VERSION};
-pub use interfaces::{RuntimeError, SessionStore, LockManager, ToolDispatcher, ToolRegistry};
+pub use agent_config::{load_agent_config, AgentConfig};
+pub use agent_loop::AgentLoop;
+pub use async_adapters::{AsyncLockManager, AsyncSessionStore};
+pub use codex_adapter::CodexAdapter;
+pub use compactor::{Compactor, Summarizer};
 pub use gateway::resolve_session;
-pub use agent_config::{AgentConfig, load_agent_config};
+pub use interfaces::{LockManager, RuntimeError, SessionStore, ToolDispatcher, ToolRegistry};
 pub use llm_client::LLMClient;
 pub use llm_client_type::LLMClientType;
-pub use compactor::{Compactor, Summarizer};
-pub use agent_loop::AgentLoop;
 pub use runtime_controller::RuntimeController;
-pub use async_adapters::{AsyncSessionStore, AsyncLockManager};
-pub use codex_adapter::CodexAdapter;
+pub use types::{LLMResponse, Message, Role, SCHEMA_VERSION};

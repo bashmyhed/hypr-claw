@@ -1,6 +1,6 @@
+use crate::tools::Tool;
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::tools::Tool;
 
 pub struct ToolRegistryImpl {
     tools: HashMap<String, Arc<dyn Tool>>,
@@ -29,7 +29,7 @@ impl ToolRegistryImpl {
     pub fn count(&self) -> usize {
         self.tools.len()
     }
-    
+
     pub fn schemas(&self) -> Vec<serde_json::Value> {
         self.tools
             .values()

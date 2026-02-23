@@ -1,20 +1,20 @@
+use crate::infra::permission_engine::PermissionEngine;
 use async_trait::async_trait;
 use hypr_claw_tools::{
-    PermissionDecision,
-    PermissionEngine as PermissionEngineTrait,
-    PermissionRequest,
+    PermissionDecision, PermissionEngine as PermissionEngineTrait, PermissionRequest,
     PermissionTier,
 };
-use crate::infra::permission_engine::PermissionEngine;
 use std::collections::HashMap;
 use std::io::{self, Write};
+use std::path::Path;
 use tokio::time::{timeout, Duration};
 
 #[async_trait]
 impl PermissionEngineTrait for PermissionEngine {
     async fn check(&self, request: PermissionRequest) -> PermissionDecision {
         // Convert to infra types
-        let input_map: HashMap<String, serde_json::Value> = request.input
+        let input_map: HashMap<String, serde_json::Value> = request
+            .input
             .as_object()
             .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default();
@@ -24,10 +24,9 @@ impl PermissionEngineTrait for PermissionEngine {
             tool_name: request.tool_name,
             input: input_map,
             permission_level: match request.permission_tier {
-                PermissionTier::Read | PermissionTier::Write => {
+                PermissionTier::Read | PermissionTier::Write | PermissionTier::Execute => {
                     crate::infra::contracts::PermissionLevel::SAFE
                 }
-                PermissionTier::Execute => crate::infra::contracts::PermissionLevel::REQUIRE_APPROVAL,
                 PermissionTier::SystemCritical => {
                     crate::infra::contracts::PermissionLevel::REQUIRE_APPROVAL
                 }
@@ -42,6 +41,9 @@ impl PermissionEngineTrait for PermissionEngine {
                 PermissionDecision::Deny("Permission denied".to_string())
             }
             crate::infra::contracts::PermissionDecision::REQUIRE_APPROVAL => {
+                if is_full_auto_mode_enabled() {
+                    return PermissionDecision::Allow;
+                }
                 let description = format!(
                     "{} with input {}",
                     infra_request.tool_name,
@@ -55,6 +57,10 @@ impl PermissionEngineTrait for PermissionEngine {
             }
         }
     }
+}
+
+fn is_full_auto_mode_enabled() -> bool {
+    Path::new("./data/full_auto_mode.flag").exists()
 }
 
 async fn prompt_user_approval(description: &str) -> bool {

@@ -16,7 +16,10 @@ pub fn generate_pkce() -> PKCEPair {
     hasher.update(verifier.as_bytes());
     let challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
 
-    PKCEPair { challenge, verifier }
+    PKCEPair {
+        challenge,
+        verifier,
+    }
 }
 
 pub fn generate_state() -> String {
@@ -52,11 +55,7 @@ pub async fn exchange_code_for_tokens(
         ("redirect_uri", REDIRECT_URI),
     ];
 
-    let response = client
-        .post(TOKEN_URL)
-        .form(&params)
-        .send()
-        .await?;
+    let response = client.post(TOKEN_URL).form(&params).send().await?;
 
     if !response.status().is_success() {
         return Err(format!("Token exchange failed: {}", response.status()).into());
@@ -66,10 +65,8 @@ pub async fn exchange_code_for_tokens(
     let account_id = decode_jwt_account_id(&token_response.access_token)
         .ok_or("Failed to extract account ID from token")?;
 
-    let expires_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)?
-        .as_secs()
-        + token_response.expires_in;
+    let expires_at =
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() + token_response.expires_in;
 
     Ok(OAuthTokens {
         access_token: token_response.access_token,
@@ -89,11 +86,7 @@ pub async fn refresh_access_token(
         ("refresh_token", refresh_token),
     ];
 
-    let response = client
-        .post(TOKEN_URL)
-        .form(&params)
-        .send()
-        .await?;
+    let response = client.post(TOKEN_URL).form(&params).send().await?;
 
     if !response.status().is_success() {
         return Err(format!("Token refresh failed: {}", response.status()).into());
@@ -103,10 +96,8 @@ pub async fn refresh_access_token(
     let account_id = decode_jwt_account_id(&token_response.access_token)
         .ok_or("Failed to extract account ID from token")?;
 
-    let expires_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)?
-        .as_secs()
-        + token_response.expires_in;
+    let expires_at =
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() + token_response.expires_in;
 
     Ok(OAuthTokens {
         access_token: token_response.access_token,
@@ -132,7 +123,7 @@ pub fn is_token_expired(tokens: &OAuthTokens) -> bool {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    
+
     // Refresh 5 minutes before expiration
     tokens.expires_at <= now + 300
 }

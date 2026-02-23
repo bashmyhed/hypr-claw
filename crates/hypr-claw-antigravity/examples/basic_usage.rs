@@ -1,5 +1,5 @@
 use anyhow::Result;
-use hypr_claw_antigravity::{AntigravityClient, oauth};
+use hypr_claw_antigravity::{oauth, AntigravityClient};
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -36,25 +36,28 @@ async fn main() -> Result<()> {
     let storage_path = PathBuf::from("./data/antigravity-accounts.json");
     let mut client = AntigravityClient::new(storage_path).await?;
 
-    client.add_account(
-        token_result.email,
-        token_result.refresh,
-        token_result.project_id,
-    ).await?;
+    client
+        .add_account(
+            token_result.email,
+            token_result.refresh,
+            token_result.project_id,
+        )
+        .await?;
 
-    println!("✓ Account stored ({} total accounts)\n", client.account_count());
+    println!(
+        "✓ Account stored ({} total accounts)\n",
+        client.account_count()
+    );
 
     // Step 3: Make a request to Antigravity API (Claude)
     println!("=== Testing Antigravity API (Claude) ===\n");
 
     let claude_request = hypr_claw_antigravity::api_client::ChatRequest {
         model: "antigravity-claude-opus-4-6-thinking-medium".to_string(),
-        messages: vec![
-            hypr_claw_antigravity::api_client::Message {
-                role: "user".to_string(),
-                content: "What is 2+2? Think step by step.".to_string(),
-            }
-        ],
+        messages: vec![hypr_claw_antigravity::api_client::Message {
+            role: "user".to_string(),
+            content: "What is 2+2? Think step by step.".to_string(),
+        }],
         tools: None,
         max_tokens: Some(1024),
         temperature: Some(0.7),
@@ -67,8 +70,10 @@ async fn main() -> Result<()> {
                 println!("  {}", choice.message.content);
             }
             if let Some(usage) = response.usage {
-                println!("  Tokens: {} prompt + {} completion = {} total",
-                    usage.prompt_tokens, usage.completion_tokens, usage.total_tokens);
+                println!(
+                    "  Tokens: {} prompt + {} completion = {} total",
+                    usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
+                );
             }
         }
         Err(e) => {
@@ -83,12 +88,10 @@ async fn main() -> Result<()> {
 
     let gemini_request = hypr_claw_antigravity::api_client::ChatRequest {
         model: "gemini-3-flash-preview-high".to_string(),
-        messages: vec![
-            hypr_claw_antigravity::api_client::Message {
-                role: "user".to_string(),
-                content: "Explain quantum computing in one sentence.".to_string(),
-            }
-        ],
+        messages: vec![hypr_claw_antigravity::api_client::Message {
+            role: "user".to_string(),
+            content: "Explain quantum computing in one sentence.".to_string(),
+        }],
         tools: None,
         max_tokens: Some(512),
         temperature: Some(0.7),
@@ -101,8 +104,10 @@ async fn main() -> Result<()> {
                 println!("  {}", choice.message.content);
             }
             if let Some(usage) = response.usage {
-                println!("  Tokens: {} prompt + {} completion = {} total",
-                    usage.prompt_tokens, usage.completion_tokens, usage.total_tokens);
+                println!(
+                    "  Tokens: {} prompt + {} completion = {} total",
+                    usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
+                );
             }
         }
         Err(e) => {

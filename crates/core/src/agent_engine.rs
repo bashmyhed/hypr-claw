@@ -1,5 +1,5 @@
-use crate::types::*;
 use crate::planning::Plan;
+use crate::types::*;
 use async_trait::async_trait;
 use std::sync::Arc;
 use thiserror::Error;
@@ -54,11 +54,14 @@ impl AgentEngine {
         let mut plan = Plan::new(task.to_string());
 
         // Add task to history
-        context.persistent_context.recent_history.push(HistoryEntry {
-            timestamp: chrono::Utc::now().timestamp(),
-            role: "user".to_string(),
-            content: task.to_string(),
-        });
+        context
+            .persistent_context
+            .recent_history
+            .push(HistoryEntry {
+                timestamp: chrono::Utc::now().timestamp(),
+                role: "user".to_string(),
+                content: task.to_string(),
+            });
 
         let max_iterations = context.soul_config.max_iterations;
 
@@ -81,27 +84,35 @@ impl AgentEngine {
                     let result = self.executor.execute(tool_call, context).await?;
 
                     if result.success {
-                        plan.complete_step(serde_json::to_string(&result.output).unwrap_or_default());
+                        plan.complete_step(
+                            serde_json::to_string(&result.output).unwrap_or_default(),
+                        );
                     } else {
                         plan.fail_step(result.error.clone().unwrap_or_default());
                     }
 
                     // Add tool result to history
-                    context.persistent_context.recent_history.push(HistoryEntry {
-                        timestamp: chrono::Utc::now().timestamp(),
-                        role: "tool".to_string(),
-                        content: serde_json::to_string(&result).unwrap_or_default(),
-                    });
+                    context
+                        .persistent_context
+                        .recent_history
+                        .push(HistoryEntry {
+                            timestamp: chrono::Utc::now().timestamp(),
+                            role: "tool".to_string(),
+                            content: serde_json::to_string(&result).unwrap_or_default(),
+                        });
                 }
             }
 
             // Add assistant response to history
             if let Some(content) = &response.content {
-                context.persistent_context.recent_history.push(HistoryEntry {
-                    timestamp: chrono::Utc::now().timestamp(),
-                    role: "assistant".to_string(),
-                    content: content.clone(),
-                });
+                context
+                    .persistent_context
+                    .recent_history
+                    .push(HistoryEntry {
+                        timestamp: chrono::Utc::now().timestamp(),
+                        role: "assistant".to_string(),
+                        content: content.clone(),
+                    });
             }
 
             // Check if task is complete

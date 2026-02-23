@@ -29,7 +29,7 @@ impl PermissionEngine {
 
     fn contains_blocked_pattern(&self, request: &PermissionRequest) -> bool {
         let tool_name_lower = request.tool_name.to_lowercase();
-        
+
         for pattern in BLOCKED_PATTERNS {
             if tool_name_lower.contains(&pattern.to_lowercase()) {
                 return true;
@@ -49,7 +49,9 @@ impl PermissionEngine {
         match value {
             serde_json::Value::String(s) => {
                 let s_lower = s.to_lowercase().replace(" ", "");
-                BLOCKED_PATTERNS.iter().any(|p| s_lower.contains(&p.to_lowercase()))
+                BLOCKED_PATTERNS
+                    .iter()
+                    .any(|p| s_lower.contains(&p.to_lowercase()))
             }
             serde_json::Value::Array(arr) => arr.iter().any(|v| self.value_contains_pattern(v)),
             serde_json::Value::Object(obj) => obj.values().any(|v| self.value_contains_pattern(v)),
@@ -57,4 +59,3 @@ impl PermissionEngine {
         }
     }
 }
-

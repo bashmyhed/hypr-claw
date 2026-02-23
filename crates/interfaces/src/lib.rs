@@ -1,5 +1,5 @@
-pub mod traits;
 pub mod terminal;
+pub mod traits;
 
-pub use traits::Interface;
 pub use terminal::TerminalInterface;
+pub use traits::Interface;

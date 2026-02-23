@@ -1,30 +1,30 @@
 //! Abstract interfaces for runtime dependencies.
 
 use crate::types::Message;
-use thiserror::Error;
 use async_trait::async_trait;
+use thiserror::Error;
 
 /// Runtime errors.
 #[derive(Error, Debug)]
 pub enum RuntimeError {
     #[error("Session error: {0}")]
     SessionError(String),
-    
+
     #[error("Lock error: {0}")]
     LockError(String),
-    
+
     #[error("Tool error: {0}")]
     ToolError(String),
-    
+
     #[error("LLM error: {0}")]
     LLMError(String),
-    
+
     #[error("Config error: {0}")]
     ConfigError(String),
-    
+
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
-    
+
     #[error("Serialization error: {0}")]
     SerializationError(#[from] serde_json::Error),
 }
@@ -34,7 +34,7 @@ pub enum RuntimeError {
 pub trait SessionStore: Send + Sync {
     /// Load message history for a session.
     async fn load(&self, session_key: &str) -> Result<Vec<Message>, RuntimeError>;
-    
+
     /// Save message history for a session.
     async fn save(&self, session_key: &str, messages: &[Message]) -> Result<(), RuntimeError>;
 }
@@ -44,7 +44,7 @@ pub trait SessionStore: Send + Sync {
 pub trait LockManager: Send + Sync {
     /// Acquire lock for a session.
     async fn acquire(&self, session_key: &str) -> Result<(), RuntimeError>;
-    
+
     /// Release lock for a session.
     async fn release(&self, session_key: &str);
 }
@@ -65,7 +65,7 @@ pub trait ToolDispatcher: Send + Sync {
 pub trait ToolRegistry: Send + Sync {
     /// Get list of active tool names for an agent.
     fn get_active_tools(&self, agent_id: &str) -> Vec<String>;
-    
+
     /// Get full tool schemas for an agent in OpenAI function format.
     fn get_tool_schemas(&self, agent_id: &str) -> Vec<serde_json::Value>;
 }
@@ -121,7 +121,10 @@ mod tests {
         async fn acquire(&self, session_key: &str) -> Result<(), RuntimeError> {
             let mut locks = self.locks.lock().unwrap();
             if locks.contains(session_key) {
-                return Err(RuntimeError::LockError(format!("Lock already held: {}", session_key)));
+                return Err(RuntimeError::LockError(format!(
+                    "Lock already held: {}",
+                    session_key
+                )));
             }
             locks.insert(session_key.to_string());
             Ok(())
@@ -164,24 +167,22 @@ mod tests {
             let tools = self.tools.lock().unwrap();
             tools.get(agent_id).cloned().unwrap_or_default()
         }
-        
+
         fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
-            vec![
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": "echo",
-                        "description": "Echo a message",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "message": {"type": "string"}
-                            },
-                            "required": ["message"]
-                        }
+            vec![json!({
+                "type": "function",
+                "function": {
+                    "name": "echo",
+                    "description": "Echo a message",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "message": {"type": "string"}
+                        },
+                        "required": ["message"]
                     }
-                })
-            ]
+                }
+            })]
         }
     }
 
@@ -196,10 +197,10 @@ mod tests {
     async fn test_session_store_save_and_load() {
         let store = MockSessionStore::new();
         let messages = vec![Message::new(crate::types::Role::User, json!("Hello"))];
-        
+
         store.save("test:user1", &messages).await.unwrap();
         let loaded = store.load("test:user1").await.unwrap();
-        
+
         assert_eq!(loaded.len(), 1);
     }
 
@@ -215,7 +216,7 @@ mod tests {
         let manager = MockLockManager::new();
         manager.acquire("test:user1").await.unwrap();
         manager.release("test:user1").await;
-        
+
         // Should be able to acquire again
         let result = manager.acquire("test:user1").await;
         assert!(result.is_ok());
@@ -226,7 +227,7 @@ mod tests {
         let manager = MockLockManager::new();
         manager.acquire("test:user1").await.unwrap();
         let result = manager.acquire("test:user1").await;
-        
+
         assert!(result.is_err());
         match result {
             Err(RuntimeError::LockError(msg)) => assert!(msg.contains("already held")),
@@ -241,7 +242,7 @@ mod tests {
             .execute("search", &json!({"query": "test"}), "test:user1")
             .await
             .unwrap();
-        
+
         assert_eq!(result["status"], "success");
         assert_eq!(result["tool"], "search");
     }
@@ -257,7 +258,7 @@ mod tests {
     fn test_runtime_error_display() {
         let err = RuntimeError::SessionError("test error".to_string());
         assert_eq!(err.to_string(), "Session error: test error");
-        
+
         let err = RuntimeError::LockError("lock failed".to_string());
         assert_eq!(err.to_string(), "Lock error: lock failed");
     }

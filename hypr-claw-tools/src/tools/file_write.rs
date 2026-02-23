@@ -1,12 +1,12 @@
+use crate::error::ToolError;
+use crate::execution_context::ExecutionContext;
+use crate::sandbox::PathGuard;
+use crate::tools::base::{Tool, ToolResult};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use crate::error::ToolError;
-use crate::execution_context::ExecutionContext;
-use crate::sandbox::PathGuard;
-use crate::tools::base::{Tool, ToolResult};
 
 #[derive(Deserialize)]
 struct FileWriteInput {
@@ -57,14 +57,16 @@ impl Tool for FileWriteTool {
         _ctx: ExecutionContext,
         input: serde_json::Value,
     ) -> Result<ToolResult, ToolError> {
-        let input: FileWriteInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::ValidationError(e.to_string()))?;
+        let input: FileWriteInput =
+            serde_json::from_value(input).map_err(|e| ToolError::ValidationError(e.to_string()))?;
 
         let path_guard = PathGuard::new(&self.sandbox_root)?;
         let validated_path = path_guard.validate_new(&input.path)?;
 
         if validated_path.exists() && !input.overwrite {
-            return Err(ToolError::ValidationError("File exists and overwrite=false".into()));
+            return Err(ToolError::ValidationError(
+                "File exists and overwrite=false".into(),
+            ));
         }
 
         if let Some(parent) = validated_path.parent() {

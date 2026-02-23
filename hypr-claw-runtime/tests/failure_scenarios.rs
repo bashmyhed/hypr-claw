@@ -2,12 +2,12 @@
 
 #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 
-use hypr_claw_runtime::*;
-use hypr_claw_runtime::LLMClientType;
 use async_trait::async_trait;
+use hypr_claw_runtime::LLMClientType;
+use hypr_claw_runtime::*;
 use serde_json::json;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 
 // Mock implementations
@@ -65,24 +65,22 @@ impl ToolRegistry for MockToolRegistry {
         vec!["test".to_string()]
     }
 
-        fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
-            vec![
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": "echo",
-                        "description": "Echo a message",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "message": {"type": "string"}
-                            },
-                            "required": ["message"]
-                        }
-                    }
-                })
-            ]
-        }
+    fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
+        vec![json!({
+            "type": "function",
+            "function": {
+                "name": "echo",
+                "description": "Echo a message",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string"}
+                    },
+                    "required": ["message"]
+                }
+            }
+        })]
+    }
 }
 
 struct FailingSummarizer;
@@ -150,8 +148,10 @@ async fn test_disk_write_failure() {
     // Trigger failure
     should_fail.store(true, Ordering::SeqCst);
 
-    let result = agent_loop.run("test:session", "agent1", "system", "test").await;
-    
+    let result = agent_loop
+        .run("test:session", "agent1", "system", "test")
+        .await;
+
     // Should fail gracefully
     assert!(result.is_err());
     match result {
@@ -209,8 +209,10 @@ async fn test_compactor_failure() {
     );
 
     // Create many messages to trigger compaction
-    let result = agent_loop.run("test:session", "agent1", "system", "test").await;
-    
+    let result = agent_loop
+        .run("test:session", "agent1", "system", "test")
+        .await;
+
     // Should handle compactor failure
     let _ = result;
 }
@@ -222,7 +224,10 @@ async fn test_llm_timeout() {
     let dispatcher = Arc::new(MockToolDispatcher);
     let registry = Arc::new(MockToolRegistry);
     // Invalid URL will cause timeout
-    let llm_client = LLMClientType::Standard(LLMClient::new("http://invalid-host-that-does-not-exist:9999".to_string(), 0));
+    let llm_client = LLMClientType::Standard(LLMClient::new(
+        "http://invalid-host-that-does-not-exist:9999".to_string(),
+        0,
+    ));
     let compactor = Compactor::new(1000, MockSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -235,8 +240,10 @@ async fn test_llm_timeout() {
         5,
     );
 
-    let result = agent_loop.run("test:session", "agent1", "system", "test").await;
-    
+    let result = agent_loop
+        .run("test:session", "agent1", "system", "test")
+        .await;
+
     // Should fail with LLM error
     assert!(result.is_err());
     match result {
@@ -247,8 +254,9 @@ async fn test_llm_timeout() {
 
 #[tokio::test]
 async fn test_circuit_breaker_opens() {
-    let llm_client = LLMClientType::Standard(LLMClient::new("http://invalid-host:9999".to_string(), 0));
-    
+    let llm_client =
+        LLMClientType::Standard(LLMClient::new("http://invalid-host:9999".to_string(), 0));
+
     // Create dummy tool schema
     let dummy_tools = vec![json!({
         "type": "function",
@@ -261,13 +269,13 @@ async fn test_circuit_breaker_opens() {
             }
         }
     })];
-    
+
     // Trigger multiple failures
     for _ in 0..6 {
         let result = llm_client.call("system", &[], &dummy_tools).await;
         assert!(result.is_err());
     }
-    
+
     // Circuit breaker should be open now
     let result = llm_client.call("system", &[], &dummy_tools).await;
     assert!(result.is_err());

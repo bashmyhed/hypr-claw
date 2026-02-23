@@ -5,6 +5,7 @@ use crate::interfaces::{LockManager, RuntimeError, SessionStore, ToolDispatcher,
 use crate::llm_client_type::LLMClientType;
 use crate::types::{LLMResponse, Message, Role};
 use serde_json::json;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
@@ -23,7 +24,7 @@ where
     tool_registry: Arc<R>,
     llm_client: LLMClientType,
     compactor: Compactor<Sum>,
-    max_iterations: usize,
+    max_iterations: Arc<AtomicUsize>,
 }
 
 impl<S, L, D, R, Sum> AgentLoop<S, L, D, R, Sum>
@@ -52,8 +53,33 @@ where
             tool_registry,
             llm_client,
             compactor,
-            max_iterations,
+            max_iterations: Arc::new(AtomicUsize::new(max_iterations.max(1))),
         }
+    }
+
+    /// Update active LLM model at runtime.
+    pub fn set_model(&self, model: &str) -> Result<(), RuntimeError> {
+        self.llm_client.set_model(model)
+    }
+
+    /// Get current active LLM model.
+    pub fn current_model(&self) -> Option<String> {
+        self.llm_client.current_model()
+    }
+
+    /// List available LLM models from provider.
+    pub async fn list_models(&self) -> Result<Vec<String>, RuntimeError> {
+        self.llm_client.list_models().await
+    }
+
+    /// Update max iteration budget at runtime (used when switching souls).
+    pub fn set_max_iterations(&self, value: usize) {
+        self.max_iterations.store(value.max(1), Ordering::SeqCst);
+    }
+
+    /// Get current max iteration budget.
+    pub fn max_iterations(&self) -> usize {
+        self.max_iterations.load(Ordering::SeqCst)
     }
 
     /// Execute agent loop for a user message.
@@ -108,16 +134,20 @@ where
 
         // Get available tool schemas
         let tool_schemas = self.tool_registry.get_tool_schemas(agent_id);
-        
+
         // CRITICAL: Fail early if no tools available
         if tool_schemas.is_empty() {
             warn!("No tools available for agent: {}", agent_id);
             return Err(RuntimeError::LLMError(
-                "Agent has no tools registered. Cannot execute OS operations.".to_string()
+                "Agent has no tools registered. Cannot execute OS operations.".to_string(),
             ));
         }
-        
-        info!("Agent {} has {} tools available", agent_id, tool_schemas.len());
+
+        info!(
+            "Agent {} has {} tools available",
+            agent_id,
+            tool_schemas.len()
+        );
 
         // Execute LLM loop
         let final_response = self
@@ -152,28 +182,28 @@ where
         let tool_names: Vec<String> = tool_schemas
             .iter()
             .filter_map(|schema| {
-                schema.get("function")
+                schema
+                    .get("function")
                     .and_then(|f| f.get("name"))
                     .and_then(|n| n.as_str())
                     .map(|s| s.to_string())
             })
             .collect();
-        
+
         let reinforced_prompt = format!(
             "{}\n\nYou are a local autonomous Linux agent. You MUST use tools to perform file, process, wallpaper, or system operations. Do not describe actions — call the appropriate tool.\n\nAvailable tools: {}",
             system_prompt,
             tool_names.join(", ")
         );
-        
+
         let action_requires_tool = requires_tool_call_for_user_message(user_message);
         let mut saw_tool_call = false;
+        let mut tool_call_count = 0usize;
+        let mut last_tool_error: Option<String> = None;
+        let max_iterations = self.max_iterations();
 
-        for iteration in 0..self.max_iterations {
-            debug!(
-                "LLM loop iteration {}/{}",
-                iteration + 1,
-                self.max_iterations
-            );
+        for iteration in 0..max_iterations {
+            debug!("LLM loop iteration {}/{}", iteration + 1, max_iterations);
 
             // Call LLM with reinforced prompt
             let response = self
@@ -193,11 +223,17 @@ where
                             "Tool invocation required but not performed".to_string(),
                         ));
                     }
-                    info!("LLM returned final response after {} iterations", iteration + 1);
+                    info!(
+                        "LLM returned final response after {} iterations",
+                        iteration + 1
+                    );
                     return Ok(content);
                 }
-                LLMResponse::ToolCall { tool_name, input, .. } => {
+                LLMResponse::ToolCall {
+                    tool_name, input, ..
+                } => {
                     saw_tool_call = true;
+                    tool_call_count += 1;
                     info!("LLM requested tool: {}", tool_name);
 
                     // Append tool call message
@@ -224,6 +260,10 @@ where
                         }
                     };
 
+                    if let Some(err) = tool_result.get("error").and_then(|v| v.as_str()) {
+                        last_tool_error = Some(err.to_string());
+                    }
+
                     // Append tool result
                     messages.push(Message::with_metadata(
                         Role::Tool,
@@ -237,9 +277,20 @@ where
         }
 
         // Max iterations exceeded
+        if saw_tool_call {
+            let mut summary = format!(
+                "Execution reached iteration limit ({max_iterations}) after {tool_call_count} tool calls."
+            );
+            if let Some(last_error) = last_tool_error {
+                summary.push_str(&format!(" Last tool error: {}", last_error));
+            }
+            summary.push_str(" I can continue from this state if you say 'continue'.");
+            return Ok(summary);
+        }
+
         Err(RuntimeError::LLMError(format!(
             "Max iterations ({}) exceeded without final response",
-            self.max_iterations
+            max_iterations
         )))
     }
 }
@@ -280,10 +331,10 @@ fn requires_tool_call_for_user_message(user_message: &str) -> bool {
 mod tests {
     use super::*;
     use crate::LLMClient;
+    use async_trait::async_trait;
     use serde_json::json;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
-    use async_trait::async_trait;
 
     // Mock implementations
     struct MockSessionStore {
@@ -364,24 +415,22 @@ mod tests {
         fn get_active_tools(&self, _agent_id: &str) -> Vec<String> {
             vec![]
         }
-        
+
         fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
-            vec![
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": "echo",
-                        "description": "Echo a message",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "message": {"type": "string"}
-                            },
-                            "required": ["message"]
-                        }
+            vec![json!({
+                "type": "function",
+                "function": {
+                    "name": "echo",
+                    "description": "Echo a message",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "message": {"type": "string"}
+                        },
+                        "required": ["message"]
                     }
-                })
-            ]
+                }
+            })]
         }
     }
 
@@ -419,7 +468,9 @@ mod tests {
         );
 
         // This will fail because the mock LLM client can't actually make calls
-        let result = agent_loop.run("agent:user1", "agent", "You are helpful", "Hi").await;
+        let result = agent_loop
+            .run("agent:user1", "agent", "You are helpful", "Hi")
+            .await;
         assert!(result.is_err());
 
         // Lock should be released
@@ -437,15 +488,9 @@ mod tests {
         let compactor = Compactor::new(10000, MockSummarizer);
 
         let agent_loop = AgentLoop::new(
-            store,
-            lock_mgr,
-            dispatcher,
-            registry,
-            llm_client,
-            compactor,
-            10,
+            store, lock_mgr, dispatcher, registry, llm_client, compactor, 10,
         );
 
-        assert_eq!(agent_loop.max_iterations, 10);
+        assert_eq!(agent_loop.max_iterations(), 10);
     }
 }

@@ -7,7 +7,39 @@ use tokio::task;
 
 /// Spawn a process
 pub async fn spawn(command: &str, args: &[&str]) -> OsResult<u32> {
-    let child = Command::new(command).args(args).spawn()?;
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return Err(OsError::InvalidArgument(
+            "command cannot be empty".to_string(),
+        ));
+    }
+
+    let (program, normalized_args): (String, Vec<String>) =
+        if args.is_empty() && trimmed.contains(' ') {
+            let parts = trimmed
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<String>>();
+            if parts.is_empty() {
+                return Err(OsError::InvalidArgument(
+                    "command cannot be empty".to_string(),
+                ));
+            }
+            let program = parts[0].clone();
+            let tail = parts.into_iter().skip(1).collect::<Vec<String>>();
+            (program, tail)
+        } else {
+            (
+                trimmed.to_string(),
+                args.iter()
+                    .map(|arg| (*arg).to_string())
+                    .collect::<Vec<String>>(),
+            )
+        };
+
+    let child = Command::new(program)
+        .args(normalized_args.iter().map(String::as_str))
+        .spawn()?;
 
     Ok(child
         .id()

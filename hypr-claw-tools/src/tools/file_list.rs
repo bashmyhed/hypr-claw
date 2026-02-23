@@ -1,11 +1,11 @@
-use async_trait::async_trait;
-use serde::Deserialize;
-use serde_json::json;
-use tokio::fs;
 use crate::error::ToolError;
 use crate::execution_context::ExecutionContext;
 use crate::sandbox::PathGuard;
 use crate::tools::base::{Tool, ToolResult};
+use async_trait::async_trait;
+use serde::Deserialize;
+use serde_json::json;
+use tokio::fs;
 
 const MAX_ENTRIES: usize = 1000;
 
@@ -53,8 +53,8 @@ impl Tool for FileListTool {
         _ctx: ExecutionContext,
         input: serde_json::Value,
     ) -> Result<ToolResult, ToolError> {
-        let input: FileListInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::ValidationError(e.to_string()))?;
+        let input: FileListInput =
+            serde_json::from_value(input).map_err(|e| ToolError::ValidationError(e.to_string()))?;
 
         let path_guard = PathGuard::new(&self.sandbox_root)?;
         let validated_path = path_guard.validate(&input.path)?;
@@ -64,10 +64,11 @@ impl Tool for FileListTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
-        while let Some(entry) = dir.next_entry()
+        while let Some(entry) = dir
+            .next_entry()
             .await
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))? {
-            
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?
+        {
             if entries.len() >= MAX_ENTRIES {
                 break;
             }

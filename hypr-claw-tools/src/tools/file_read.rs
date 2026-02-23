@@ -1,11 +1,11 @@
-use async_trait::async_trait;
-use serde::Deserialize;
-use serde_json::json;
-use tokio::fs;
 use crate::error::ToolError;
 use crate::execution_context::ExecutionContext;
 use crate::sandbox::PathGuard;
 use crate::tools::base::{Tool, ToolResult};
+use async_trait::async_trait;
+use serde::Deserialize;
+use serde_json::json;
+use tokio::fs;
 
 #[derive(Deserialize)]
 struct FileReadInput {
@@ -52,12 +52,12 @@ impl Tool for FileReadTool {
         _ctx: ExecutionContext,
         input: serde_json::Value,
     ) -> Result<ToolResult, ToolError> {
-        let input: FileReadInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::ValidationError(e.to_string()))?;
+        let input: FileReadInput =
+            serde_json::from_value(input).map_err(|e| ToolError::ValidationError(e.to_string()))?;
 
         let path_guard = PathGuard::new(&self.sandbox_root)?;
         let validated_path = path_guard.validate(&input.path)?;
-        
+
         let content = fs::read_to_string(&validated_path)
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;

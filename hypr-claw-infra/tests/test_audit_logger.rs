@@ -30,7 +30,7 @@ fn test_log_single_entry() {
     let file = File::open(&log_path).unwrap();
     let reader = BufReader::new(file);
     let lines: Vec<_> = reader.lines().collect();
-    
+
     assert_eq!(lines.len(), 1);
 }
 
@@ -48,7 +48,7 @@ fn test_log_multiple_entries() {
     let file = File::open(&log_path).unwrap();
     let reader = BufReader::new(file);
     let lines: Vec<_> = reader.lines().collect();
-    
+
     assert_eq!(lines.len(), 10);
 }
 
@@ -56,12 +56,12 @@ fn test_log_multiple_entries() {
 fn test_append_only() {
     let temp = TempDir::new().unwrap();
     let log_path = temp.path().join("audit.log");
-    
+
     {
         let logger = AuditLogger::new(&log_path).unwrap();
         logger.log(&create_entry("session1", "tool1")).unwrap();
     }
-    
+
     {
         let logger = AuditLogger::new(&log_path).unwrap();
         logger.log(&create_entry("session2", "tool2")).unwrap();
@@ -70,7 +70,7 @@ fn test_append_only() {
     let file = File::open(&log_path).unwrap();
     let reader = BufReader::new(file);
     let lines: Vec<_> = reader.lines().collect();
-    
+
     assert_eq!(lines.len(), 2);
 }
 
@@ -81,7 +81,7 @@ fn test_concurrent_logging() {
     let logger = Arc::new(AuditLogger::new(&log_path).unwrap());
 
     let mut handles = vec![];
-    
+
     for i in 0..10 {
         let logger_clone = Arc::clone(&logger);
         let handle = thread::spawn(move || {
@@ -98,7 +98,7 @@ fn test_concurrent_logging() {
     let file = File::open(&log_path).unwrap();
     let reader = BufReader::new(file);
     let lines: Vec<_> = reader.lines().collect();
-    
+
     assert_eq!(lines.len(), 10);
 }
 
@@ -114,7 +114,7 @@ fn test_json_format() {
     let file = File::open(&log_path).unwrap();
     let reader = BufReader::new(file);
     let line = reader.lines().next().unwrap().unwrap();
-    
+
     let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(parsed["session"], "session1");
     assert_eq!(parsed["tool"], "tool1");
@@ -127,15 +127,19 @@ fn test_entry_with_data() {
     let logger = AuditLogger::new(&log_path).unwrap();
 
     let mut entry = create_entry("session1", "tool1");
-    entry.input.insert("param".to_string(), serde_json::json!("value"));
-    entry.result.insert("status".to_string(), serde_json::json!("success"));
-    
+    entry
+        .input
+        .insert("param".to_string(), serde_json::json!("value"));
+    entry
+        .result
+        .insert("status".to_string(), serde_json::json!("success"));
+
     logger.log(&entry).unwrap();
 
     let file = File::open(&log_path).unwrap();
     let reader = BufReader::new(file);
     let line = reader.lines().next().unwrap().unwrap();
-    
+
     let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(parsed["input"]["param"], "value");
     assert_eq!(parsed["result"]["status"], "success");
@@ -145,7 +149,7 @@ fn test_entry_with_data() {
 fn test_creates_parent_directory() {
     let temp = TempDir::new().unwrap();
     let log_path = temp.path().join("logs").join("nested").join("audit.log");
-    
+
     let logger = AuditLogger::new(&log_path).unwrap();
     logger.log(&create_entry("session1", "tool1")).unwrap();
 

@@ -13,15 +13,15 @@ proptest! {
         tool_calls_present in any::<bool>(),
     ) {
         let mut response_json = json!({});
-        
+
         if let Some(c) = content {
             response_json["content"] = json!(c);
         }
-        
+
         if tool_calls_present {
             response_json["tool_calls"] = json!([]);
         }
-        
+
         // Should not panic
         let result: Result<LLMResponse, _> = serde_json::from_value(response_json);
         // Either succeeds or fails gracefully
@@ -34,20 +34,20 @@ proptest! {
         arguments in prop::option::of(any::<String>()),
     ) {
         let mut tool_call = json!({});
-        
+
         if let Some(name) = tool_name {
             tool_call["tool_name"] = json!(name);
         }
-        
+
         if let Some(args) = arguments {
             tool_call["arguments"] = json!(args);
         }
-        
+
         let response_json = json!({
             "content": null,
             "tool_calls": [tool_call]
         });
-        
+
         // Should not panic
         let result: Result<LLMResponse, _> = serde_json::from_value(response_json);
         let _ = result;
@@ -69,7 +69,7 @@ fn test_empty_content_and_tool_calls() {
         "content": null,
         "tool_calls": []
     });
-    
+
     let result: Result<LLMResponse, _> = serde_json::from_value(response_json);
     // Should handle gracefully
     assert!(result.is_ok() || result.is_err());
@@ -83,7 +83,7 @@ fn test_tool_call_without_tool_name() {
             "arguments": "{}"
         }]
     });
-    
+
     let result: Result<LLMResponse, _> = serde_json::from_value(response_json);
     // Should fail gracefully, not panic
     assert!(result.is_err());
@@ -98,7 +98,7 @@ fn test_tool_call_with_invalid_arguments() {
             "arguments": "not valid json"
         }]
     });
-    
+
     let result: Result<LLMResponse, _> = serde_json::from_value(response_json);
     // Should handle gracefully
     let _ = result;
@@ -110,12 +110,12 @@ fn test_deeply_nested_structure() {
     for i in 1..100 {
         nested = json!({"level": i, "nested": nested});
     }
-    
+
     let response_json = json!({
         "content": nested,
         "tool_calls": []
     });
-    
+
     // Should not stack overflow
     let result: Result<LLMResponse, _> = serde_json::from_value(response_json);
     let _ = result;

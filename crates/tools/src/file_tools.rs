@@ -184,11 +184,7 @@ impl Tool for FileListTool {
             .map_err(|e| ToolError::Execution(e.to_string()))?
         {
             let name = entry.file_name().to_string_lossy().to_string();
-            let is_dir = entry
-                .file_type()
-                .await
-                .map(|t| t.is_dir())
-                .unwrap_or(false);
+            let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
             entries.push(json!({ "name": name, "is_dir": is_dir }));
         }
 

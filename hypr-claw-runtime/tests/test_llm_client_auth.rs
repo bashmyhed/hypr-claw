@@ -9,7 +9,7 @@ mod llm_client_tests {
             1,
             "test-api-key".to_string(),
         );
-        
+
         // Client should be created successfully
         // API key is stored internally (not exposed)
         drop(client);
@@ -17,11 +17,8 @@ mod llm_client_tests {
 
     #[test]
     fn test_llm_client_without_api_key() {
-        let client = LLMClient::new(
-            "http://localhost:8080".to_string(),
-            1,
-        );
-        
+        let client = LLMClient::new("http://localhost:8080".to_string(), 1);
+
         // Client should be created successfully
         drop(client);
     }
@@ -32,9 +29,12 @@ mod llm_client_tests {
         let base_url = "https://integrate.api.nvidia.com/v1";
         let endpoint = "/chat/completions";
         let expected = "https://integrate.api.nvidia.com/v1/chat/completions";
-        
+
         let constructed = format!("{}{}", base_url, endpoint);
-        assert_eq!(constructed, expected, "NVIDIA URL construction must be correct");
+        assert_eq!(
+            constructed, expected,
+            "NVIDIA URL construction must be correct"
+        );
     }
 
     #[test]
@@ -43,9 +43,12 @@ mod llm_client_tests {
         let base_url = "https://generativelanguage.googleapis.com/v1beta/openai";
         let endpoint = "/chat/completions";
         let expected = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
-        
+
         let constructed = format!("{}{}", base_url, endpoint);
-        assert_eq!(constructed, expected, "Google URL construction must be correct");
+        assert_eq!(
+            constructed, expected,
+            "Google URL construction must be correct"
+        );
     }
 
     #[test]
@@ -54,9 +57,12 @@ mod llm_client_tests {
         let base_url = "http://localhost:8080";
         let endpoint = "/chat/completions";
         let expected = "http://localhost:8080/chat/completions";
-        
+
         let constructed = format!("{}{}", base_url, endpoint);
-        assert_eq!(constructed, expected, "Local URL construction must be correct");
+        assert_eq!(
+            constructed, expected,
+            "Local URL construction must be correct"
+        );
     }
 
     #[test]
@@ -68,7 +74,7 @@ mod llm_client_tests {
             "test-google-api-key".to_string(),
             "gemini-2.5-pro".to_string(),
         );
-        
+
         // Client should be created successfully with API key
         drop(client);
     }

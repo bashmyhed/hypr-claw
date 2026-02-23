@@ -2,7 +2,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use hypr_claw_runtime::{Message, LLMResponse, Role, SCHEMA_VERSION};
+use hypr_claw_runtime::{LLMResponse, Message, Role, SCHEMA_VERSION};
 use serde_json::json;
 
 #[test]
@@ -19,7 +19,7 @@ fn test_message_version_mismatch() {
         "role": "user",
         "content": "test"
     }"#;
-    
+
     let msg: Message = serde_json::from_str(json_str).unwrap();
     assert!(msg.validate_version().is_err());
 }
@@ -30,7 +30,7 @@ fn test_message_missing_version_defaults() {
         "role": "user",
         "content": "test"
     }"#;
-    
+
     let msg: Message = serde_json::from_str(json_str).unwrap();
     assert_eq!(msg.schema_version, SCHEMA_VERSION);
     assert!(msg.validate_version().is_ok());
@@ -38,25 +38,31 @@ fn test_message_missing_version_defaults() {
 
 #[test]
 fn test_llm_response_final_correct_version() {
-    let json_str = format!(r#"{{
+    let json_str = format!(
+        r#"{{
         "type": "final",
         "schema_version": {},
         "content": "test"
-    }}"#, SCHEMA_VERSION);
-    
+    }}"#,
+        SCHEMA_VERSION
+    );
+
     let response: LLMResponse = serde_json::from_str(&json_str).unwrap();
     assert!(response.validate_version().is_ok());
 }
 
 #[test]
 fn test_llm_response_tool_call_correct_version() {
-    let json_str = format!(r#"{{
+    let json_str = format!(
+        r#"{{
         "type": "tool_call",
         "schema_version": {},
         "tool_name": "test",
         "input": {{}}
-    }}"#, SCHEMA_VERSION);
-    
+    }}"#,
+        SCHEMA_VERSION
+    );
+
     let response: LLMResponse = serde_json::from_str(&json_str).unwrap();
     assert!(response.validate_version().is_ok());
 }
@@ -68,7 +74,7 @@ fn test_llm_response_version_mismatch() {
         "schema_version": 999,
         "content": "test"
     }"#;
-    
+
     let response: LLMResponse = serde_json::from_str(json_str).unwrap();
     assert!(response.validate_version().is_err());
 }
@@ -79,7 +85,7 @@ fn test_llm_response_missing_version_defaults() {
         "type": "final",
         "content": "test"
     }"#;
-    
+
     let response: LLMResponse = serde_json::from_str(json_str).unwrap();
     assert!(response.validate_version().is_ok());
 }
@@ -91,7 +97,7 @@ fn test_version_error_message() {
         "role": "user",
         "content": "test"
     }"#;
-    
+
     let msg: Message = serde_json::from_str(json_str).unwrap();
     let err = msg.validate_version().unwrap_err();
     assert!(err.contains("expected 1"));

@@ -2,7 +2,7 @@
 
 use crate::interfaces::RuntimeError;
 use crate::types::{LLMResponse, Message};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -26,6 +26,12 @@ struct OpenAIRequest {
     tools: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
 }
 
 /// OpenAI-compatible response format
@@ -54,6 +60,16 @@ struct OpenAIToolCall {
 struct OpenAIFunction {
     name: String,
     arguments: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIModelsResponse {
+    data: Vec<OpenAIModelEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIModelEntry {
+    id: String,
 }
 
 /// Circuit breaker state.
@@ -118,7 +134,7 @@ pub struct LLMClient {
     max_retries: u32,
     circuit_breaker: Arc<CircuitBreaker>,
     api_key: Option<String>,
-    model: Option<String>,
+    model: Arc<RwLock<Option<String>>>,
 }
 
 impl LLMClient {
@@ -139,7 +155,7 @@ impl LLMClient {
             max_retries,
             circuit_breaker: Arc::new(CircuitBreaker::new(5, Duration::from_secs(30))),
             api_key: None,
-            model: None,
+            model: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -157,10 +173,103 @@ impl LLMClient {
         api_key: String,
         model: String,
     ) -> Self {
-        let mut client = Self::new(base_url, max_retries);
-        client.api_key = Some(api_key);
-        client.model = Some(model);
+        let client = Self::with_api_key(base_url, max_retries, api_key);
+        client.set_model(&model).ok();
         client
+    }
+
+    /// Set active model for OpenAI-compatible providers.
+    pub fn set_model(&self, model: &str) -> Result<(), RuntimeError> {
+        let trimmed = model.trim();
+        if trimmed.is_empty() {
+            return Err(RuntimeError::LLMError("Model cannot be empty".to_string()));
+        }
+        *self.model.write() = Some(trimmed.to_string());
+        Ok(())
+    }
+
+    /// Get currently active model.
+    pub fn current_model(&self) -> Option<String> {
+        self.model.read().clone()
+    }
+
+    /// List models from provider OpenAI-compatible `/models` endpoint.
+    pub async fn list_models(&self) -> Result<Vec<String>, RuntimeError> {
+        let url = format!("{}/models", self.base_url.trim_end_matches('/'));
+        let mut req_builder = self.client.get(&url);
+
+        if let Some(api_key) = &self.api_key {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        let response = req_builder.send().await.map_err(|e| {
+            RuntimeError::LLMError(format!("Failed to query models endpoint: {}", e))
+        })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unable to read models response".to_string());
+            return Err(RuntimeError::LLMError(format!(
+                "Failed to list models: HTTP {}. Details: {}",
+                status, body
+            )));
+        }
+
+        let body = response.text().await.map_err(|e| {
+            RuntimeError::LLMError(format!("Failed to read models response: {}", e))
+        })?;
+
+        let mut models: Vec<String> = Vec::new();
+
+        if let Ok(parsed) = serde_json::from_str::<OpenAIModelsResponse>(&body) {
+            models.extend(parsed.data.into_iter().map(|m| m.id));
+        } else if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
+            if let Some(items) = value.get("data").and_then(|v| v.as_array()) {
+                for item in items {
+                    if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                        models.push(id.to_string());
+                    }
+                }
+            }
+        }
+
+        models.sort();
+        models.dedup();
+
+        if models.is_empty() {
+            if let Some(current) = self.current_model() {
+                return Ok(vec![current]);
+            }
+            return Err(RuntimeError::LLMError(
+                "Models endpoint returned no model IDs".to_string(),
+            ));
+        }
+
+        Ok(models)
+    }
+
+    fn model_generation_profile(&self, model: &str) -> (Option<f32>, Option<f32>, Option<u32>) {
+        let m = model.to_lowercase();
+        // GLM-4.7 guidance for terminal/agentic workloads.
+        if m == "z-ai/glm4.7" || m.ends_with("/glm4.7") {
+            return (Some(0.7), Some(1.0), Some(16_384));
+        }
+        // Stable defaults for tool-driven automation.
+        (Some(0.2), Some(0.95), Some(4_096))
+    }
+
+    fn retry_delay_for_error(&self, attempt: u32, err: &RuntimeError) -> Duration {
+        let msg = err.to_string().to_lowercase();
+        if msg.contains("rate limit") || msg.contains("429") {
+            if let Some(seconds) = extract_retry_seconds(&msg) {
+                return Duration::from_secs(seconds.min(90));
+            }
+            return Duration::from_secs((2_u64.saturating_pow(attempt + 1)).min(30));
+        }
+        Duration::from_millis((250_u64.saturating_mul(2_u64.saturating_pow(attempt))).min(5000))
     }
 
     /// Call LLM service with retry logic.
@@ -206,9 +315,10 @@ impl LLMClient {
                 }
                 Err(e) => {
                     warn!("LLM call failed (attempt {}): {}", attempt + 1, e);
+                    let delay = self.retry_delay_for_error(attempt, &e);
                     last_error = Some(e);
                     if attempt < self.max_retries {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        tokio::time::sleep(delay).await;
                     }
                 }
             }
@@ -232,11 +342,12 @@ impl LLMClient {
         tool_schemas: &[serde_json::Value],
     ) -> Result<LLMResponse, RuntimeError> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        let active_model = self.current_model();
 
         let mut req_builder = self.client.post(&url);
 
         // Use OpenAI format if model is specified (NVIDIA/Google), otherwise use custom format
-        if let Some(model) = &self.model {
+        if let Some(model) = &active_model {
             // Convert to OpenAI format
             let mut openai_messages = Vec::new();
             let mut last_tool_call_id: Option<String> = None;
@@ -319,11 +430,15 @@ impl LLMClient {
                 }));
             }
 
+            let (temperature, top_p, max_tokens) = self.model_generation_profile(model);
             let openai_request = OpenAIRequest {
                 model: model.clone(),
                 messages: openai_messages,
                 tools: Some(tool_schemas.to_vec()),
                 tool_choice: Some("auto".to_string()),
+                temperature,
+                top_p,
+                max_tokens,
             };
 
             debug!("llm url={}", url);
@@ -404,7 +519,7 @@ impl LLMClient {
         }
 
         let llm_response: LLMResponse =
-            if self.model.is_some() {
+            if active_model.is_some() {
                 // Parse OpenAI format response
                 let openai_response: OpenAIResponse = response.json().await.map_err(|e| {
                     RuntimeError::LLMError(format!("Failed to parse response: {}", e))
@@ -466,6 +581,19 @@ impl LLMClient {
         }
         Ok(())
     }
+}
+
+fn extract_retry_seconds(msg: &str) -> Option<u64> {
+    for token in msg.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '.') {
+        if let Some(stripped) = token.strip_suffix('s') {
+            if let Ok(v) = stripped.parse::<u64>() {
+                if v > 0 {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

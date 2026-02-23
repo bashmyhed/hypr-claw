@@ -49,7 +49,12 @@ impl AccountManager {
         })
     }
 
-    pub async fn add_account(&mut self, email: Option<String>, refresh: String, project_id: String) -> Result<()> {
+    pub async fn add_account(
+        &mut self,
+        email: Option<String>,
+        refresh: String,
+        project_id: String,
+    ) -> Result<()> {
         let parts: Vec<&str> = refresh.split('|').collect();
         let refresh_token = parts.first().unwrap_or(&"").to_string();
         let project_id = if parts.len() > 1 {
@@ -94,7 +99,7 @@ impl AccountManager {
         let start_index = self.current_index;
         loop {
             let account = &self.accounts[self.current_index];
-            
+
             // Check if account is rate limited
             let is_rate_limited = account
                 .rate_limit_reset_times
@@ -169,7 +174,7 @@ impl AccountManager {
         };
 
         let content = serde_json::to_string_pretty(&storage)?;
-        
+
         // Create parent directory if it doesn't exist
         if let Some(parent) = self.storage_path.parent() {
             fs::create_dir_all(parent).await?;

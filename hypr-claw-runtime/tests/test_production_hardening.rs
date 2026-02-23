@@ -2,8 +2,8 @@
 //! Production hardening tests for edge cases and defensive programming.
 
 use async_trait::async_trait;
-use hypr_claw_runtime::*;
 use hypr_claw_runtime::LLMClientType;
+use hypr_claw_runtime::*;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -87,7 +87,10 @@ impl ToolDispatcher for MockToolDispatcher {
         _session_key: &str,
     ) -> Result<serde_json::Value, RuntimeError> {
         if self.should_fail {
-            Err(RuntimeError::ToolError(format!("Tool not found: {}", tool_name)))
+            Err(RuntimeError::ToolError(format!(
+                "Tool not found: {}",
+                tool_name
+            )))
         } else {
             Ok(json!({"status": "success", "tool": tool_name}))
         }
@@ -101,24 +104,22 @@ impl ToolRegistry for MockToolRegistry {
         vec![]
     }
 
-        fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
-            vec![
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": "echo",
-                        "description": "Echo a message",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "message": {"type": "string"}
-                            },
-                            "required": ["message"]
-                        }
-                    }
-                })
-            ]
-        }
+    fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
+        vec![json!({
+            "type": "function",
+            "function": {
+                "name": "echo",
+                "description": "Echo a message",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string"}
+                    },
+                    "required": ["message"]
+                }
+            }
+        })]
+    }
 }
 
 struct MockSummarizer;
@@ -135,17 +136,14 @@ async fn test_infinite_loop_prevention() {
     let temp_path = temp_dir.path();
 
     std::fs::write(temp_path.join("agent.md"), "You are helpful.").unwrap();
-    std::fs::write(
-        temp_path.join("agent.yaml"),
-        "id: agent\nsoul: agent.md\n",
-    )
-    .unwrap();
+    std::fs::write(temp_path.join("agent.yaml"), "id: agent\nsoul: agent.md\n").unwrap();
 
     let store = Arc::new(MockSessionStore::new());
     let lock_mgr = Arc::new(MockLockManager::new());
     let dispatcher = Arc::new(MockToolDispatcher::new(false));
     let registry = Arc::new(MockToolRegistry);
-    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
+    let llm_client =
+        LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
     let compactor = Compactor::new(10000, MockSummarizer);
 
     // Set low max_iterations
@@ -180,7 +178,7 @@ async fn test_malformed_llm_output() {
     // Serialization works
     let serialized = serde_json::to_string(&response).unwrap();
     assert!(serialized.contains("final"));
-    
+
     // Empty tool name
     let response = LLMResponse::ToolCall {
         schema_version: hypr_claw_runtime::SCHEMA_VERSION,
@@ -197,17 +195,14 @@ async fn test_tool_not_found_handling() {
     let temp_path = temp_dir.path();
 
     std::fs::write(temp_path.join("agent.md"), "You are helpful.").unwrap();
-    std::fs::write(
-        temp_path.join("agent.yaml"),
-        "id: agent\nsoul: agent.md\n",
-    )
-    .unwrap();
+    std::fs::write(temp_path.join("agent.yaml"), "id: agent\nsoul: agent.md\n").unwrap();
 
     let store = Arc::new(MockSessionStore::new());
     let lock_mgr = Arc::new(MockLockManager::new());
     let dispatcher = Arc::new(MockToolDispatcher::new(true)); // Will fail
     let registry = Arc::new(MockToolRegistry);
-    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
+    let llm_client =
+        LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
     let compactor = Compactor::new(10000, MockSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -337,10 +332,10 @@ fn test_compactor_single_large_message() {
 async fn test_lock_release_on_panic_scenario() {
     // Test that lock manager properly handles release even in error scenarios
     let lock_mgr = MockLockManager::new();
-    
+
     lock_mgr.acquire("test:session").await.unwrap();
     assert!(lock_mgr.locks.lock().unwrap().contains("test:session"));
-    
+
     lock_mgr.release("test:session").await;
     assert!(!lock_mgr.locks.lock().unwrap().contains("test:session"));
 }
@@ -353,7 +348,7 @@ fn test_config_validation() {
     // Missing soul file
     let config_file = temp_path.join("agent.yaml");
     std::fs::write(&config_file, "id: test\nsoul: missing.md\n").unwrap();
-    
+
     let result = load_agent_config(config_file.to_str().unwrap());
     assert!(result.is_err());
     match result {

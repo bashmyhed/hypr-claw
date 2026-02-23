@@ -1,8 +1,8 @@
 use anyhow::Result;
-use hypr_claw_antigravity::{AntigravityClient, oauth};
 use hypr_claw_antigravity::api_client::{ChatRequest, Message};
-use std::path::PathBuf;
+use hypr_claw_antigravity::{oauth, AntigravityClient};
 use std::io::{self, Write};
+use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
         let auth = oauth::authorize_antigravity(None).await?;
         println!("\n   Open this URL in your browser:");
         println!("   {}\n", auth.url);
-        
+
         println!("2. After authorization, enter the code from the redirect URL:");
         print!("   Code: ");
         io::stdout().flush()?;
@@ -35,14 +35,16 @@ async fn main() -> Result<()> {
 
         println!("\n3. Exchanging code for tokens...");
         let result = oauth::exchange_antigravity(code, state).await?;
-        
+
         println!("✅ Authentication successful!");
         println!("   Email: {:?}", result.email);
         println!("   Project ID: {}\n", result.project_id);
 
         // Initialize client and add account
         let mut client = AntigravityClient::new(storage_path.clone()).await?;
-        client.add_account(result.email, result.refresh, result.project_id).await?;
+        client
+            .add_account(result.email, result.refresh, result.project_id)
+            .await?;
         println!("✅ Account saved\n");
     }
 
@@ -62,7 +64,7 @@ async fn main() -> Result<()> {
 
     let mut choice = String::new();
     io::stdin().read_line(&mut choice)?;
-    
+
     let model = match choice.trim() {
         "1" => "antigravity-claude-opus-4-6-thinking-medium",
         "2" => "antigravity-claude-opus-4-6-thinking-high",
@@ -81,7 +83,7 @@ async fn main() -> Result<()> {
     loop {
         print!("You: ");
         io::stdout().flush()?;
-        
+
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
         let input = input.trim();
@@ -113,10 +115,12 @@ async fn main() -> Result<()> {
             Ok(response) => {
                 if let Some(choice) = response.choices.first() {
                     println!("{}\n", choice.message.content);
-                    
+
                     if let Some(usage) = response.usage {
-                        println!("📊 Tokens: {} prompt + {} completion = {} total\n",
-                            usage.prompt_tokens, usage.completion_tokens, usage.total_tokens);
+                        println!(
+                            "📊 Tokens: {} prompt + {} completion = {} total\n",
+                            usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
+                        );
                     }
                 } else {
                     println!("❌ No response from model\n");

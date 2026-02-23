@@ -1,5 +1,5 @@
 use parking_lot::Mutex;
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use std::path::Path;
 use thiserror::Error;
 
@@ -17,7 +17,7 @@ impl MemoryStore {
     pub fn new<P: AsRef<Path>>(db_path: P) -> Result<Self, MemoryStoreError> {
         let conn = Connection::open(db_path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        
+
         conn.execute(
             "CREATE TABLE IF NOT EXISTS memory (
                 id INTEGER PRIMARY KEY,
@@ -28,21 +28,24 @@ impl MemoryStore {
             )",
             [],
         )?;
-        
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_key ON memory(key)",
-            [],
-        )?;
 
-        Ok(Self { conn: Mutex::new(conn) })
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_key ON memory(key)", [])?;
+
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     pub fn save_memory(&self, key: &str, content: &str) -> Result<(), MemoryStoreError> {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn.lock();
-        
+
         let existing: Option<i64> = conn
-            .query_row("SELECT id FROM memory WHERE key = ?1", params![key], |row| row.get(0))
+            .query_row(
+                "SELECT id FROM memory WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
             .ok();
 
         if let Some(id) = existing {
@@ -63,14 +66,12 @@ impl MemoryStore {
     pub fn search_memory(&self, query: &str) -> Result<Vec<(String, String)>, MemoryStoreError> {
         let pattern = format!("%{}%", query);
         let conn = self.conn.lock();
-        
+
         let mut stmt = conn.prepare(
             "SELECT key, content FROM memory WHERE key LIKE ?1 OR content LIKE ?1 ORDER BY updated_at DESC"
         )?;
 
-        let results = stmt.query_map(params![pattern], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?;
+        let results = stmt.query_map(params![pattern], |row| Ok((row.get(0)?, row.get(1)?)))?;
 
         let mut memories = Vec::new();
         for result in results {
@@ -80,4 +81,3 @@ impl MemoryStore {
         Ok(memories)
     }
 }
-

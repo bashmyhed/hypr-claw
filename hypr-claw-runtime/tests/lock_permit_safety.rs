@@ -2,8 +2,8 @@
 //! Lock and permit safety audit tests.
 
 use async_trait::async_trait;
-use hypr_claw_runtime::*;
 use hypr_claw_runtime::LLMClientType;
+use hypr_claw_runtime::*;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -124,24 +124,22 @@ impl ToolRegistry for AuditToolRegistry {
         vec![]
     }
 
-        fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
-            vec![
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": "echo",
-                        "description": "Echo a message",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "message": {"type": "string"}
-                            },
-                            "required": ["message"]
-                        }
-                    }
-                })
-            ]
-        }
+    fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
+        vec![json!({
+            "type": "function",
+            "function": {
+                "name": "echo",
+                "description": "Echo a message",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string"}
+                    },
+                    "required": ["message"]
+                }
+            }
+        })]
+    }
 }
 
 struct AuditSummarizer;
@@ -158,17 +156,14 @@ async fn test_lock_released_on_normal_completion() {
     let temp_path = temp_dir.path();
 
     std::fs::write(temp_path.join("agent.md"), "You are helpful.").unwrap();
-    std::fs::write(
-        temp_path.join("agent.yaml"),
-        "id: agent\nsoul: agent.md\n",
-    )
-    .unwrap();
+    std::fs::write(temp_path.join("agent.yaml"), "id: agent\nsoul: agent.md\n").unwrap();
 
     let store = Arc::new(AuditSessionStore::new());
     let lock_mgr = Arc::new(AuditLockManager::new());
     let dispatcher = Arc::new(AuditToolDispatcher);
     let registry = Arc::new(AuditToolRegistry);
-    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
+    let llm_client =
+        LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, AuditSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -197,17 +192,14 @@ async fn test_lock_released_on_llm_failure() {
     let temp_path = temp_dir.path();
 
     std::fs::write(temp_path.join("agent.md"), "You are helpful.").unwrap();
-    std::fs::write(
-        temp_path.join("agent.yaml"),
-        "id: agent\nsoul: agent.md\n",
-    )
-    .unwrap();
+    std::fs::write(temp_path.join("agent.yaml"), "id: agent\nsoul: agent.md\n").unwrap();
 
     let store = Arc::new(AuditSessionStore::new());
     let lock_mgr = Arc::new(AuditLockManager::new());
     let dispatcher = Arc::new(AuditToolDispatcher);
     let registry = Arc::new(AuditToolRegistry);
-    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
+    let llm_client =
+        LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, AuditSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -237,17 +229,14 @@ async fn test_lock_released_on_tool_failure() {
     let temp_path = temp_dir.path();
 
     std::fs::write(temp_path.join("agent.md"), "You are helpful.").unwrap();
-    std::fs::write(
-        temp_path.join("agent.yaml"),
-        "id: agent\nsoul: agent.md\n",
-    )
-    .unwrap();
+    std::fs::write(temp_path.join("agent.yaml"), "id: agent\nsoul: agent.md\n").unwrap();
 
     let store = Arc::new(AuditSessionStore::new());
     let lock_mgr = Arc::new(AuditLockManager::new());
     let dispatcher = Arc::new(FailingToolDispatcher);
     let registry = Arc::new(AuditToolRegistry);
-    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
+    let llm_client =
+        LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, AuditSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -277,17 +266,14 @@ async fn test_multiple_requests_no_lock_leak() {
     let temp_path = temp_dir.path();
 
     std::fs::write(temp_path.join("agent.md"), "You are helpful.").unwrap();
-    std::fs::write(
-        temp_path.join("agent.yaml"),
-        "id: agent\nsoul: agent.md\n",
-    )
-    .unwrap();
+    std::fs::write(temp_path.join("agent.yaml"), "id: agent\nsoul: agent.md\n").unwrap();
 
     let store = Arc::new(AuditSessionStore::new());
     let lock_mgr = Arc::new(AuditLockManager::new());
     let dispatcher = Arc::new(AuditToolDispatcher);
     let registry = Arc::new(AuditToolRegistry);
-    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
+    let llm_client =
+        LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, AuditSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -321,17 +307,14 @@ async fn test_concurrent_requests_no_lock_leak() {
     let temp_path = temp_dir.path();
 
     std::fs::write(temp_path.join("agent.md"), "You are helpful.").unwrap();
-    std::fs::write(
-        temp_path.join("agent.yaml"),
-        "id: agent\nsoul: agent.md\n",
-    )
-    .unwrap();
+    std::fs::write(temp_path.join("agent.yaml"), "id: agent\nsoul: agent.md\n").unwrap();
 
     let store = Arc::new(AuditSessionStore::new());
     let lock_mgr = Arc::new(AuditLockManager::new());
     let dispatcher = Arc::new(AuditToolDispatcher);
     let registry = Arc::new(AuditToolRegistry);
-    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
+    let llm_client =
+        LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, AuditSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -378,17 +361,14 @@ async fn test_lock_balance_after_mixed_success_failure() {
     let temp_path = temp_dir.path();
 
     std::fs::write(temp_path.join("agent.md"), "You are helpful.").unwrap();
-    std::fs::write(
-        temp_path.join("agent.yaml"),
-        "id: agent\nsoul: agent.md\n",
-    )
-    .unwrap();
+    std::fs::write(temp_path.join("agent.yaml"), "id: agent\nsoul: agent.md\n").unwrap();
 
     let store = Arc::new(AuditSessionStore::new());
     let lock_mgr = Arc::new(AuditLockManager::new());
     let dispatcher = Arc::new(AuditToolDispatcher);
     let registry = Arc::new(AuditToolRegistry);
-    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
+    let llm_client =
+        LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, AuditSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -434,10 +414,7 @@ async fn test_lock_manager_invariant() {
     }
 
     // Invariant: acquire_count == release_count
-    assert_eq!(
-        lock_mgr.get_acquire_count(),
-        lock_mgr.get_release_count()
-    );
+    assert_eq!(lock_mgr.get_acquire_count(), lock_mgr.get_release_count());
     assert_eq!(lock_mgr.get_active_locks(), 0);
 }
 

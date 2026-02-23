@@ -22,7 +22,7 @@ pub struct AuditLogger {
 impl AuditLogger {
     pub fn new<P: AsRef<Path>>(log_path: P) -> Result<Self, AuditLoggerError> {
         let log_path = log_path.as_ref().to_path_buf();
-        
+
         if let Some(parent) = log_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -46,4 +46,3 @@ impl AuditLogger {
         Ok(())
     }
 }
-

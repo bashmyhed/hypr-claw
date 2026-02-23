@@ -5,7 +5,8 @@ pub fn strip_thinking_blocks(content: &mut Value) {
     if let Some(array) = content.as_array_mut() {
         array.retain(|item| {
             if let Some(obj) = item.as_object() {
-                !obj.contains_key("thinking") && obj.get("type").and_then(|v| v.as_str()) != Some("thinking")
+                !obj.contains_key("thinking")
+                    && obj.get("type").and_then(|v| v.as_str()) != Some("thinking")
             } else {
                 true
             }
@@ -55,7 +56,11 @@ pub fn clean_json_schema(schema: &mut Value) {
 }
 
 /// Add thinking configuration to request
-pub fn add_thinking_config(body: &mut Value, thinking_budget: Option<u32>, thinking_level: Option<&str>) {
+pub fn add_thinking_config(
+    body: &mut Value,
+    thinking_budget: Option<u32>,
+    thinking_level: Option<&str>,
+) {
     if let Some(budget) = thinking_budget {
         if let Some(obj) = body.as_object_mut() {
             obj.insert(

@@ -2,8 +2,8 @@
 //! Startup integrity check tests.
 
 use async_trait::async_trait;
-use hypr_claw_runtime::*;
 use hypr_claw_runtime::LLMClientType;
+use hypr_claw_runtime::*;
 use serde_json::json;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -90,24 +90,22 @@ impl ToolRegistry for NormalToolRegistry {
         vec![]
     }
 
-        fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
-            vec![
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": "echo",
-                        "description": "Echo a message",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "message": {"type": "string"}
-                            },
-                            "required": ["message"]
-                        }
-                    }
-                })
-            ]
-        }
+    fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
+        vec![json!({
+            "type": "function",
+            "function": {
+                "name": "echo",
+                "description": "Echo a message",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string"}
+                    },
+                    "required": ["message"]
+                }
+            }
+        })]
+    }
 }
 
 struct NormalSummarizer;
@@ -124,27 +122,18 @@ async fn test_corrupted_session_load_fails_fast() {
     let temp_path = temp_dir.path();
 
     std::fs::write(temp_path.join("agent.md"), "You are helpful.").unwrap();
-    std::fs::write(
-        temp_path.join("agent.yaml"),
-        "id: agent\nsoul: agent.md\n",
-    )
-    .unwrap();
+    std::fs::write(temp_path.join("agent.yaml"), "id: agent\nsoul: agent.md\n").unwrap();
 
     let store = Arc::new(CorruptedSessionStore::new(true));
     let lock_mgr = Arc::new(NormalLockManager::new());
     let dispatcher = Arc::new(NormalToolDispatcher);
     let registry = Arc::new(NormalToolRegistry);
-    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
+    let llm_client =
+        LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, NormalSummarizer);
 
     let agent_loop = AgentLoop::new(
-        store,
-        lock_mgr,
-        dispatcher,
-        registry,
-        llm_client,
-        compactor,
-        10,
+        store, lock_mgr, dispatcher, registry, llm_client, compactor, 10,
     );
 
     let controller = RuntimeController::new(agent_loop, temp_path.to_str().unwrap().to_string());
@@ -156,7 +145,9 @@ async fn test_corrupted_session_load_fails_fast() {
     match result {
         Err(RuntimeError::LLMError(msg)) => {
             // Wrapped in LLMError by runtime controller
-            assert!(msg.contains("Corrupted session data") || msg.contains("Runtime execution failed"));
+            assert!(
+                msg.contains("Corrupted session data") || msg.contains("Runtime execution failed")
+            );
         }
         _ => panic!("Expected error containing session corruption message"),
     }
@@ -173,17 +164,12 @@ async fn test_missing_config_file_fails_fast() {
     let lock_mgr = Arc::new(NormalLockManager::new());
     let dispatcher = Arc::new(NormalToolDispatcher);
     let registry = Arc::new(NormalToolRegistry);
-    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
+    let llm_client =
+        LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, NormalSummarizer);
 
     let agent_loop = AgentLoop::new(
-        store,
-        lock_mgr,
-        dispatcher,
-        registry,
-        llm_client,
-        compactor,
-        10,
+        store, lock_mgr, dispatcher, registry, llm_client, compactor, 10,
     );
 
     let controller = RuntimeController::new(agent_loop, temp_path.to_str().unwrap().to_string());
@@ -216,17 +202,12 @@ async fn test_missing_soul_file_fails_fast() {
     let lock_mgr = Arc::new(NormalLockManager::new());
     let dispatcher = Arc::new(NormalToolDispatcher);
     let registry = Arc::new(NormalToolRegistry);
-    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
+    let llm_client =
+        LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, NormalSummarizer);
 
     let agent_loop = AgentLoop::new(
-        store,
-        lock_mgr,
-        dispatcher,
-        registry,
-        llm_client,
-        compactor,
-        10,
+        store, lock_mgr, dispatcher, registry, llm_client, compactor, 10,
     );
 
     let controller = RuntimeController::new(agent_loop, temp_path.to_str().unwrap().to_string());
@@ -259,17 +240,12 @@ async fn test_invalid_yaml_config_fails_fast() {
     let lock_mgr = Arc::new(NormalLockManager::new());
     let dispatcher = Arc::new(NormalToolDispatcher);
     let registry = Arc::new(NormalToolRegistry);
-    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
+    let llm_client =
+        LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, NormalSummarizer);
 
     let agent_loop = AgentLoop::new(
-        store,
-        lock_mgr,
-        dispatcher,
-        registry,
-        llm_client,
-        compactor,
-        10,
+        store, lock_mgr, dispatcher, registry, llm_client, compactor, 10,
     );
 
     let controller = RuntimeController::new(agent_loop, temp_path.to_str().unwrap().to_string());
@@ -298,17 +274,12 @@ async fn test_empty_config_file_fails_fast() {
     let lock_mgr = Arc::new(NormalLockManager::new());
     let dispatcher = Arc::new(NormalToolDispatcher);
     let registry = Arc::new(NormalToolRegistry);
-    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
+    let llm_client =
+        LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, NormalSummarizer);
 
     let agent_loop = AgentLoop::new(
-        store,
-        lock_mgr,
-        dispatcher,
-        registry,
-        llm_client,
-        compactor,
-        10,
+        store, lock_mgr, dispatcher, registry, llm_client, compactor, 10,
     );
 
     let controller = RuntimeController::new(agent_loop, temp_path.to_str().unwrap().to_string());
@@ -363,11 +334,7 @@ fn test_config_validation_on_load() {
 
     // Config missing required id field
     std::fs::write(temp_path.join("agent.md"), "Soul content").unwrap();
-    std::fs::write(
-        temp_path.join("agent.yaml"),
-        "soul: agent.md\n",
-    )
-    .unwrap();
+    std::fs::write(temp_path.join("agent.yaml"), "soul: agent.md\n").unwrap();
 
     let result = load_agent_config(temp_path.join("agent.yaml").to_str().unwrap());
     assert!(result.is_err());
@@ -386,27 +353,18 @@ async fn test_healthy_startup_succeeds() {
 
     // Create valid config
     std::fs::write(temp_path.join("agent.md"), "You are helpful.").unwrap();
-    std::fs::write(
-        temp_path.join("agent.yaml"),
-        "id: agent\nsoul: agent.md\n",
-    )
-    .unwrap();
+    std::fs::write(temp_path.join("agent.yaml"), "id: agent\nsoul: agent.md\n").unwrap();
 
     let store = Arc::new(CorruptedSessionStore::new(false));
     let lock_mgr = Arc::new(NormalLockManager::new());
     let dispatcher = Arc::new(NormalToolDispatcher);
     let registry = Arc::new(NormalToolRegistry);
-    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
+    let llm_client =
+        LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, NormalSummarizer);
 
     let agent_loop = AgentLoop::new(
-        store,
-        lock_mgr,
-        dispatcher,
-        registry,
-        llm_client,
-        compactor,
-        10,
+        store, lock_mgr, dispatcher, registry, llm_client, compactor, 10,
     );
 
     let controller = RuntimeController::new(agent_loop, temp_path.to_str().unwrap().to_string());
@@ -414,7 +372,7 @@ async fn test_healthy_startup_succeeds() {
     // Should not panic during initialization
     // Execution will fail (no real LLM) but startup is clean
     let result = controller.execute("user1", "agent", "Test").await;
-    
+
     // Will fail due to LLM, but not due to startup issues
     assert!(result.is_err());
 }

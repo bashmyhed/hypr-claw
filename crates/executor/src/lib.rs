@@ -1,5 +1,5 @@
-pub mod environment;
 pub mod command_executor;
+pub mod environment;
 
-pub use environment::EnvironmentSnapshot;
 pub use command_executor::CommandExecutor;
+pub use environment::EnvironmentSnapshot;

@@ -1,12 +1,12 @@
 #[cfg(test)]
 mod integration_tests {
-    use hypr_claw_tools::*;
-    use hypr_claw_tools::tools::*;
-    use std::sync::Arc;
-    use serde_json::json;
-    use tokio::fs;
-    use std::path::PathBuf;
     use async_trait::async_trait;
+    use hypr_claw_tools::tools::*;
+    use hypr_claw_tools::*;
+    use serde_json::json;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::fs;
 
     // Mock implementations for testing
     struct MockPermissionEngine;
@@ -28,7 +28,10 @@ mod integration_tests {
 
     async fn setup_sandbox() -> PathBuf {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let sandbox = std::env::temp_dir().join(format!("test_sandbox_{}", nanos));
         let _ = fs::remove_dir_all(&sandbox).await;
         fs::create_dir_all(&sandbox).await.unwrap();
@@ -44,7 +47,10 @@ mod integration_tests {
 
         let tool = FileReadTool::new(sandbox.to_str().unwrap()).unwrap();
         let ctx = ExecutionContext::new("session".into(), 5000);
-        let result = tool.execute(ctx, json!({"path": "test.txt"})).await.unwrap();
+        let result = tool
+            .execute(ctx, json!({"path": "test.txt"}))
+            .await
+            .unwrap();
 
         assert!(result.success);
         assert!(result.output.is_some());
@@ -65,15 +71,20 @@ mod integration_tests {
         let sandbox = setup_sandbox().await;
         let tool = FileWriteTool::new(sandbox.to_str().unwrap()).unwrap();
         let ctx = ExecutionContext::new("session".into(), 5000);
-        
-        let result = tool.execute(
-            ctx,
-            json!({"path": "output.txt", "content": "test content", "overwrite": false})
-        ).await.unwrap();
+
+        let result = tool
+            .execute(
+                ctx,
+                json!({"path": "output.txt", "content": "test content", "overwrite": false}),
+            )
+            .await
+            .unwrap();
 
         assert!(result.success);
-        
-        let content = fs::read_to_string(sandbox.join("output.txt")).await.unwrap();
+
+        let content = fs::read_to_string(sandbox.join("output.txt"))
+            .await
+            .unwrap();
         assert_eq!(content, "test content");
     }
 
@@ -85,11 +96,13 @@ mod integration_tests {
 
         let tool = FileWriteTool::new(sandbox.to_str().unwrap()).unwrap();
         let ctx = ExecutionContext::new("session".into(), 5000);
-        
-        let result = tool.execute(
-            ctx,
-            json!({"path": "existing.txt", "content": "new", "overwrite": false})
-        ).await;
+
+        let result = tool
+            .execute(
+                ctx,
+                json!({"path": "existing.txt", "content": "new", "overwrite": false}),
+            )
+            .await;
 
         assert!(result.is_err());
     }
@@ -102,14 +115,17 @@ mod integration_tests {
 
         let tool = FileWriteTool::new(sandbox.to_str().unwrap()).unwrap();
         let ctx = ExecutionContext::new("session".into(), 5000);
-        
-        let result = tool.execute(
-            ctx,
-            json!({"path": "existing.txt", "content": "new", "overwrite": true})
-        ).await.unwrap();
+
+        let result = tool
+            .execute(
+                ctx,
+                json!({"path": "existing.txt", "content": "new", "overwrite": true}),
+            )
+            .await
+            .unwrap();
 
         assert!(result.success);
-        
+
         let content = fs::read_to_string(&test_file).await.unwrap();
         assert_eq!(content, "new");
     }
@@ -150,7 +166,10 @@ mod integration_tests {
     async fn test_shell_exec_success() {
         let tool = ShellExecTool;
         let ctx = ExecutionContext::new("session".into(), 5000);
-        let result = tool.execute(ctx, json!({"cmd": ["echo", "hello"]})).await.unwrap();
+        let result = tool
+            .execute(ctx, json!({"cmd": ["echo", "hello"]}))
+            .await
+            .unwrap();
 
         assert!(result.success);
         let output = result.output.unwrap();
@@ -189,7 +208,9 @@ mod integration_tests {
     async fn test_shell_exec_pipe_blocked() {
         let tool = ShellExecTool;
         let ctx = ExecutionContext::new("session".into(), 5000);
-        let result = tool.execute(ctx, json!({"cmd": ["ls", "|", "grep", "test"]})).await;
+        let result = tool
+            .execute(ctx, json!({"cmd": ["ls", "|", "grep", "test"]}))
+            .await;
 
         assert!(matches!(result, Err(ToolError::SandboxViolation(_))));
     }
@@ -197,14 +218,17 @@ mod integration_tests {
     #[tokio::test]
     async fn test_parallel_execution_different_sessions() {
         let tool = Arc::new(EchoTool);
-        
-        let handles: Vec<_> = (0..10).map(|i| {
-            let tool = tool.clone();
-            tokio::spawn(async move {
-                let ctx = ExecutionContext::new(format!("session_{}", i), 5000);
-                tool.execute(ctx, json!({"message": format!("msg_{}", i)})).await
+
+        let handles: Vec<_> = (0..10)
+            .map(|i| {
+                let tool = tool.clone();
+                tokio::spawn(async move {
+                    let ctx = ExecutionContext::new(format!("session_{}", i), 5000);
+                    tool.execute(ctx, json!({"message": format!("msg_{}", i)}))
+                        .await
+                })
             })
-        }).collect();
+            .collect();
 
         for handle in handles {
             let result = handle.await.unwrap().unwrap();
@@ -215,14 +239,17 @@ mod integration_tests {
     #[tokio::test]
     async fn test_parallel_execution_same_session() {
         let tool = Arc::new(EchoTool);
-        
-        let handles: Vec<_> = (0..10).map(|i| {
-            let tool = tool.clone();
-            tokio::spawn(async move {
-                let ctx = ExecutionContext::new("shared_session".into(), 5000);
-                tool.execute(ctx, json!({"message": format!("msg_{}", i)})).await
+
+        let handles: Vec<_> = (0..10)
+            .map(|i| {
+                let tool = tool.clone();
+                tokio::spawn(async move {
+                    let ctx = ExecutionContext::new("shared_session".into(), 5000);
+                    tool.execute(ctx, json!({"message": format!("msg_{}", i)}))
+                        .await
+                })
             })
-        }).collect();
+            .collect();
 
         for handle in handles {
             let result = handle.await.unwrap().unwrap();
@@ -233,14 +260,16 @@ mod integration_tests {
     #[tokio::test]
     async fn test_parallel_execution_100_concurrent() {
         let tool = Arc::new(EchoTool);
-        
-        let handles: Vec<_> = (0..100).map(|i| {
-            let tool = tool.clone();
-            tokio::spawn(async move {
-                let ctx = ExecutionContext::new(format!("session_{}", i % 10), 5000);
-                tool.execute(ctx, json!({"message": i})).await
+
+        let handles: Vec<_> = (0..100)
+            .map(|i| {
+                let tool = tool.clone();
+                tokio::spawn(async move {
+                    let ctx = ExecutionContext::new(format!("session_{}", i % 10), 5000);
+                    tool.execute(ctx, json!({"message": i})).await
+                })
             })
-        }).collect();
+            .collect();
 
         let mut success_count = 0;
         for handle in handles {
@@ -258,7 +287,7 @@ mod integration_tests {
     async fn test_dispatcher_parallel_dispatch() {
         let mut registry = ToolRegistryImpl::new();
         registry.register(Arc::new(EchoTool));
-        
+
         let dispatcher = Arc::new(ToolDispatcherImpl::new(
             Arc::new(registry),
             Arc::new(MockPermissionEngine) as Arc<dyn PermissionEngine>,
@@ -266,16 +295,20 @@ mod integration_tests {
             5000,
         ));
 
-        let handles: Vec<_> = (0..50).map(|i| {
-            let dispatcher = dispatcher.clone();
-            tokio::spawn(async move {
-                dispatcher.dispatch(
-                    format!("session_{}", i),
-                    "echo".into(),
-                    json!({"message": i}),
-                ).await
+        let handles: Vec<_> = (0..50)
+            .map(|i| {
+                let dispatcher = dispatcher.clone();
+                tokio::spawn(async move {
+                    dispatcher
+                        .dispatch(
+                            format!("session_{}", i),
+                            "echo".into(),
+                            json!({"message": i}),
+                        )
+                        .await
+                })
             })
-        }).collect();
+            .collect();
 
         for handle in handles {
             let result = handle.await.unwrap().unwrap();
@@ -312,7 +345,7 @@ mod integration_tests {
     async fn test_file_write_atomic() {
         let sandbox = setup_sandbox().await;
         let tool = FileWriteTool::new(sandbox.to_str().unwrap()).unwrap();
-        
+
         // Write multiple times concurrently
         let handles: Vec<_> = (0..10).map(|i| {
             let tool = Arc::new(tool.clone());
@@ -335,7 +368,7 @@ mod integration_tests {
     async fn test_audit_logging_on_error() {
         let mut registry = ToolRegistryImpl::new();
         registry.register(Arc::new(EchoTool));
-        
+
         let dispatcher = ToolDispatcherImpl::new(
             Arc::new(registry),
             Arc::new(MockPermissionEngine) as Arc<dyn PermissionEngine>,
@@ -344,11 +377,9 @@ mod integration_tests {
         );
 
         // Tool not found should still audit
-        let _ = dispatcher.dispatch(
-            "session".into(),
-            "nonexistent".into(),
-            json!({}),
-        ).await;
+        let _ = dispatcher
+            .dispatch("session".into(), "nonexistent".into(), json!({}))
+            .await;
 
         // Should not panic
     }

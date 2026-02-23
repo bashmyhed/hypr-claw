@@ -1,4 +1,4 @@
-use rlimit::{Resource, setrlimit};
+use rlimit::{setrlimit, Resource};
 
 const MEMORY_LIMIT: u64 = 512 * 1024 * 1024; // 512MB
 const CPU_LIMIT: u64 = 60; // 60 seconds
@@ -12,19 +12,19 @@ impl ResourceLimits {
     pub fn apply() -> Result<(), Box<dyn std::error::Error>> {
         // Memory limit
         setrlimit(Resource::AS, MEMORY_LIMIT, MEMORY_LIMIT)?;
-        
+
         // CPU time limit
         setrlimit(Resource::CPU, CPU_LIMIT, CPU_LIMIT)?;
-        
+
         // File size limit
         setrlimit(Resource::FSIZE, FILE_SIZE_LIMIT, FILE_SIZE_LIMIT)?;
-        
+
         // Process limit
         setrlimit(Resource::NPROC, NPROC_LIMIT, NPROC_LIMIT)?;
-        
+
         // File descriptor limit
         setrlimit(Resource::NOFILE, NOFILE_LIMIT, NOFILE_LIMIT)?;
-        
+
         Ok(())
     }
 }

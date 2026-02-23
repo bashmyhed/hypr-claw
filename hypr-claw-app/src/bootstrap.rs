@@ -53,7 +53,7 @@ fn bootstrap_nvidia() -> Result<Config> {
 
     let config = Config {
         provider: LLMProvider::Nvidia,
-        model: "moonshotai/kimi-k2.5".to_string(),
+        model: "z-ai/glm4.7".to_string(),
     };
 
     config.save()?;

@@ -42,7 +42,12 @@ impl Scheduler {
         }
     }
 
-    pub fn register_cron<F>(&self, name: &str, schedule: &str, callable: F) -> Result<(), SchedulerError>
+    pub fn register_cron<F>(
+        &self,
+        name: &str,
+        schedule: &str,
+        callable: F,
+    ) -> Result<(), SchedulerError>
     where
         F: Fn() + Send + Sync + 'static,
     {
@@ -51,7 +56,7 @@ impl Scheduler {
             .map_err(|_| SchedulerError::InvalidCron(schedule.to_string()))?;
 
         let mut jobs = self.jobs.lock();
-        
+
         if jobs.contains_key(name) {
             return Err(SchedulerError::JobExists(name.to_string()));
         }
@@ -112,7 +117,7 @@ impl Scheduler {
 
     pub fn stop(&self) {
         *self.running.lock() = false;
-        
+
         if let Some(handle) = self.handle.lock().take() {
             let _ = handle.join();
         }
@@ -124,4 +129,3 @@ impl Drop for Scheduler {
         self.stop();
     }
 }
-

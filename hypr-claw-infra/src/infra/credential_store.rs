@@ -3,6 +3,7 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 use parking_lot::Mutex;
+use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -10,7 +11,6 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use zeroize::Zeroize;
-use rand::RngCore;
 
 #[derive(Error, Debug)]
 pub enum CredentialStoreError {
@@ -36,12 +36,15 @@ pub struct CredentialStore {
 }
 
 impl CredentialStore {
-    pub fn new<P: AsRef<Path>>(store_path: P, master_key: &[u8; 32]) -> Result<Self, CredentialStoreError> {
+    pub fn new<P: AsRef<Path>>(
+        store_path: P,
+        master_key: &[u8; 32],
+    ) -> Result<Self, CredentialStoreError> {
         let store_path = store_path.as_ref().to_path_buf();
         fs::create_dir_all(&store_path)?;
-        
+
         let cipher = Aes256Gcm::new(master_key.into());
-        
+
         Ok(Self {
             store_path,
             cipher,
@@ -54,27 +57,33 @@ impl CredentialStore {
         let mut nonce_bytes = [0u8; 12];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
-        
-        let ciphertext = self.cipher
+
+        let ciphertext = self
+            .cipher
             .encrypt(nonce, value.as_bytes())
             .map_err(|_| CredentialStoreError::Encryption)?;
 
         // Store nonce + ciphertext
-        let secret_path = self.store_path.join(format!("{}.enc", self.hash_name(name)));
+        let secret_path = self
+            .store_path
+            .join(format!("{}.enc", self.hash_name(name)));
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
             .open(&secret_path)?;
-        
+
         file.write_all(&nonce_bytes)?;
         file.write_all(&ciphertext)?;
         file.sync_all()?;
 
-        self.cache.lock().insert(name.to_string(), EncryptedBlob {
-            nonce: nonce_bytes,
-            ciphertext,
-        });
+        self.cache.lock().insert(
+            name.to_string(),
+            EncryptedBlob {
+                nonce: nonce_bytes,
+                ciphertext,
+            },
+        );
 
         Ok(())
     }
@@ -95,22 +104,25 @@ impl CredentialStore {
 
         let nonce = Nonce::from_slice(&blob.nonce);
 
-        let mut plaintext = self.cipher
+        let mut plaintext = self
+            .cipher
             .decrypt(nonce, blob.ciphertext.as_ref())
             .map_err(|_| CredentialStoreError::Encryption)?;
 
-        let result = String::from_utf8(plaintext.clone())
-            .map_err(|_| CredentialStoreError::Encryption)?;
-        
+        let result =
+            String::from_utf8(plaintext.clone()).map_err(|_| CredentialStoreError::Encryption)?;
+
         // Zeroize plaintext
         plaintext.zeroize();
-        
+
         Ok(result)
     }
 
     pub fn delete_secret(&self, name: &str) -> Result<(), CredentialStoreError> {
-        let secret_path = self.store_path.join(format!("{}.enc", self.hash_name(name)));
-        
+        let secret_path = self
+            .store_path
+            .join(format!("{}.enc", self.hash_name(name)));
+
         if secret_path.exists() {
             fs::remove_file(&secret_path)?;
         }
@@ -121,8 +133,10 @@ impl CredentialStore {
     }
 
     fn load_from_disk(&self, name: &str) -> Result<EncryptedBlob, CredentialStoreError> {
-        let secret_path = self.store_path.join(format!("{}.enc", self.hash_name(name)));
-        
+        let secret_path = self
+            .store_path
+            .join(format!("{}.enc", self.hash_name(name)));
+
         if !secret_path.exists() {
             return Err(CredentialStoreError::NotFound(name.to_string()));
         }
@@ -140,11 +154,14 @@ impl CredentialStore {
         let ciphertext = data[12..].to_vec();
 
         let blob = EncryptedBlob { nonce, ciphertext };
-        
-        self.cache.lock().insert(name.to_string(), EncryptedBlob {
-            nonce: blob.nonce,
-            ciphertext: blob.ciphertext.clone(),
-        });
+
+        self.cache.lock().insert(
+            name.to_string(),
+            EncryptedBlob {
+                nonce: blob.nonce,
+                ciphertext: blob.ciphertext.clone(),
+            },
+        );
 
         Ok(blob)
     }

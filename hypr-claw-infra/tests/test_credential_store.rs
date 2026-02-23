@@ -14,7 +14,7 @@ fn test_store_and_retrieve() {
 
     store.store_secret("api_key", "secret123").unwrap();
     let retrieved = store.get_secret("api_key").unwrap();
-    
+
     assert_eq!(retrieved, "secret123");
 }
 
@@ -25,7 +25,7 @@ fn test_update_secret() {
 
     store.store_secret("token", "old_value").unwrap();
     store.store_secret("token", "new_value").unwrap();
-    
+
     let retrieved = store.get_secret("token").unwrap();
     assert_eq!(retrieved, "new_value");
 }
@@ -37,7 +37,7 @@ fn test_delete_secret() {
 
     store.store_secret("temp_key", "temp_value").unwrap();
     store.delete_secret("temp_key").unwrap();
-    
+
     let result = store.get_secret("temp_key");
     assert!(result.is_err());
 }
@@ -57,13 +57,13 @@ fn test_encryption_verified() {
     let store = CredentialStore::new(temp.path(), &get_test_key()).unwrap();
 
     store.store_secret("secret", "plaintext").unwrap();
-    
+
     let files: Vec<_> = std::fs::read_dir(temp.path()).unwrap().collect();
     assert_eq!(files.len(), 1);
-    
+
     let file_path = files[0].as_ref().unwrap().path();
     let encrypted_content = std::fs::read(&file_path).unwrap();
-    
+
     assert!(!encrypted_content.is_empty());
     assert_ne!(encrypted_content, b"plaintext");
 }
@@ -71,12 +71,12 @@ fn test_encryption_verified() {
 #[test]
 fn test_persistence() {
     let temp = TempDir::new().unwrap();
-    
+
     {
         let store = CredentialStore::new(temp.path(), &get_test_key()).unwrap();
         store.store_secret("persistent", "data").unwrap();
     }
-    
+
     let store2 = CredentialStore::new(temp.path(), &get_test_key()).unwrap();
     let retrieved = store2.get_secret("persistent").unwrap();
     assert_eq!(retrieved, "data");
@@ -85,14 +85,14 @@ fn test_persistence() {
 #[test]
 fn test_wrong_key_fails() {
     let temp = TempDir::new().unwrap();
-    
+
     let store1 = CredentialStore::new(temp.path(), &get_test_key()).unwrap();
     store1.store_secret("secret", "value").unwrap();
-    
+
     let wrong_key = [99u8; 32];
     let store2 = CredentialStore::new(temp.path(), &wrong_key).unwrap();
     let result = store2.get_secret("secret");
-    
+
     assert!(result.is_err());
 }
 
@@ -102,7 +102,7 @@ fn test_concurrent_access() {
     let store = Arc::new(CredentialStore::new(temp.path(), &get_test_key()).unwrap());
 
     let mut handles = vec![];
-    
+
     for i in 0..5 {
         let store_clone = Arc::clone(&store);
         let handle = thread::spawn(move || {
@@ -128,6 +128,6 @@ fn test_special_characters() {
     let special_value = "p@ssw0rd!#$%^&*(){}[]|\\:;\"'<>,.?/~`";
     store.store_secret("special", special_value).unwrap();
     let retrieved = store.get_secret("special").unwrap();
-    
+
     assert_eq!(retrieved, special_value);
 }

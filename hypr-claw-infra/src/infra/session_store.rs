@@ -34,7 +34,7 @@ impl SessionStore {
 
     pub fn load(&self, session_key: &str) -> Result<Vec<Value>, SessionStoreError> {
         let path = self.session_path(session_key)?;
-        
+
         if !path.exists() {
             return Ok(Vec::new());
         }
@@ -60,15 +60,12 @@ impl SessionStore {
 
     pub fn append(&self, session_key: &str, message: &Value) -> Result<(), SessionStoreError> {
         let path = self.session_path(session_key)?;
-        
+
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
 
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
 
         let json = serde_json::to_string(message)?;
         writeln!(file, "{}", json)?;
@@ -79,13 +76,13 @@ impl SessionStore {
 
     pub fn save(&self, session_key: &str, messages: &[Value]) -> Result<(), SessionStoreError> {
         let path = self.session_path(session_key)?;
-        
+
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
 
         let temp_path = path.with_extension("tmp");
-        
+
         {
             let mut file = File::create(&temp_path)?;
             for msg in messages {
@@ -96,7 +93,7 @@ impl SessionStore {
         }
 
         fs::rename(&temp_path, &path)?;
-        
+
         Ok(())
     }
 }

@@ -9,13 +9,13 @@ pub struct ContextCompactor;
 impl ContextCompactor {
     pub fn compact(context: &mut ContextData) -> bool {
         let mut compacted = false;
-        
+
         if Self::compact_history(context) {
             compacted = true;
         }
         Self::deduplicate_facts(context);
         Self::prune_completed_tasks(context);
-        
+
         compacted
     }
 
@@ -41,10 +41,7 @@ impl ContextCompactor {
         }
 
         // Token-based compaction
-        let total_tokens: usize = history
-            .iter()
-            .filter_map(|e| e.token_count)
-            .sum();
+        let total_tokens: usize = history.iter().filter_map(|e| e.token_count).sum();
 
         if total_tokens > MAX_TOTAL_TOKENS {
             let target = history.len() / 2;
@@ -60,7 +57,7 @@ impl ContextCompactor {
             tracing::info!("Token-based compaction: removed {} entries", target);
             compacted = true;
         }
-        
+
         compacted
     }
 
@@ -98,9 +95,9 @@ impl ContextCompactor {
 
         // Keep only non-completed tasks from last 24 hours
         let cutoff = chrono::Utc::now().timestamp() - 86400;
-        context.active_tasks.retain(|task| {
-            task.status != "Completed" || task.updated_at > cutoff
-        });
+        context
+            .active_tasks
+            .retain(|task| task.status != "Completed" || task.updated_at > cutoff);
 
         if context.active_tasks.len() < original_len {
             tracing::debug!(

@@ -59,7 +59,11 @@ impl Message {
     }
 
     /// Create a new message with metadata.
-    pub fn with_metadata(role: Role, content: serde_json::Value, metadata: serde_json::Value) -> Self {
+    pub fn with_metadata(
+        role: Role,
+        content: serde_json::Value,
+        metadata: serde_json::Value,
+    ) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
             role,
@@ -87,7 +91,7 @@ impl LLMResponse {
             LLMResponse::Final { schema_version, .. } => *schema_version,
             LLMResponse::ToolCall { schema_version, .. } => *schema_version,
         };
-        
+
         if version != SCHEMA_VERSION {
             return Err(format!(
                 "Schema version mismatch: expected {}, got {}",
@@ -134,7 +138,7 @@ mod tests {
         let role = Role::User;
         let serialized = serde_json::to_string(&role).unwrap();
         assert_eq!(serialized, r#""user""#);
-        
+
         let role = Role::Assistant;
         let serialized = serde_json::to_string(&role).unwrap();
         assert_eq!(serialized, r#""assistant""#);
@@ -148,7 +152,7 @@ mod tests {
         };
         let serialized = serde_json::to_string(&response).unwrap();
         let deserialized: LLMResponse = serde_json::from_str(&serialized).unwrap();
-        
+
         match deserialized {
             LLMResponse::Final { content, .. } => assert_eq!(content, "Done"),
             _ => panic!("Expected Final response"),
@@ -164,9 +168,11 @@ mod tests {
         };
         let serialized = serde_json::to_string(&response).unwrap();
         let deserialized: LLMResponse = serde_json::from_str(&serialized).unwrap();
-        
+
         match deserialized {
-            LLMResponse::ToolCall { tool_name, input, .. } => {
+            LLMResponse::ToolCall {
+                tool_name, input, ..
+            } => {
                 assert_eq!(tool_name, "search");
                 assert_eq!(input, json!({"query": "test"}));
             }

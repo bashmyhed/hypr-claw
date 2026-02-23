@@ -13,9 +13,13 @@ struct TestToolRegistry;
 
 impl ToolRegistry for TestToolRegistry {
     fn get_active_tools(&self, _agent_id: &str) -> Vec<String> {
-        vec!["file_read".to_string(), "file_write".to_string(), "set_wallpaper".to_string()]
+        vec![
+            "file_read".to_string(),
+            "file_write".to_string(),
+            "set_wallpaper".to_string(),
+        ]
     }
-    
+
     fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
         vec![
             json!({
@@ -72,7 +76,7 @@ impl ToolRegistry for TestToolRegistry {
                         "required": ["image_path"]
                     }
                 }
-            })
+            }),
         ]
     }
 }
@@ -81,10 +85,10 @@ impl ToolRegistry for TestToolRegistry {
 fn test_tool_schemas_format() {
     let registry = TestToolRegistry;
     let schemas = registry.get_tool_schemas("test_agent");
-    
+
     // Verify we have all tools
     assert_eq!(schemas.len(), 3);
-    
+
     // Verify OpenAI function format
     for schema in &schemas {
         assert_eq!(schema["type"], "function");
@@ -92,17 +96,18 @@ fn test_tool_schemas_format() {
         assert!(schema["function"]["description"].is_string());
         assert!(schema["function"]["parameters"].is_object());
     }
-    
+
     // Verify specific tool
-    let wallpaper_tool = schemas.iter()
+    let wallpaper_tool = schemas
+        .iter()
         .find(|s| s["function"]["name"] == "set_wallpaper")
         .expect("set_wallpaper tool not found");
-    
+
     assert_eq!(
         wallpaper_tool["function"]["description"],
         "Set desktop wallpaper from an image file"
     );
-    
+
     let params = &wallpaper_tool["function"]["parameters"];
     assert_eq!(params["type"], "object");
     assert!(params["properties"]["image_path"].is_object());
@@ -113,22 +118,22 @@ fn test_tool_schemas_format() {
 fn test_empty_tools_rejected() {
     // This test demonstrates that empty tool lists are now rejected
     // In the actual runtime, this would be caught by the AgentLoop
-    
+
     struct EmptyToolRegistry;
-    
+
     impl ToolRegistry for EmptyToolRegistry {
         fn get_active_tools(&self, _agent_id: &str) -> Vec<String> {
             vec![]
         }
-        
+
         fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
             vec![]
         }
     }
-    
+
     let registry = EmptyToolRegistry;
     let schemas = registry.get_tool_schemas("test_agent");
-    
+
     // Empty schemas should be caught by AgentLoop
     assert!(schemas.is_empty());
 }
@@ -138,9 +143,9 @@ fn test_tool_names_match_schemas() {
     let registry = TestToolRegistry;
     let names = registry.get_active_tools("test_agent");
     let schemas = registry.get_tool_schemas("test_agent");
-    
+
     assert_eq!(names.len(), schemas.len());
-    
+
     for (name, schema) in names.iter().zip(schemas.iter()) {
         assert_eq!(name, schema["function"]["name"].as_str().unwrap());
     }

@@ -1,13 +1,16 @@
 #[cfg(test)]
 mod sandbox_tests {
-    use hypr_claw_tools::sandbox::*;
     use hypr_claw_tools::error::ToolError;
-    use tokio::fs;
+    use hypr_claw_tools::sandbox::*;
     use std::path::PathBuf;
+    use tokio::fs;
 
     async fn setup_sandbox() -> PathBuf {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let sandbox = std::env::temp_dir().join(format!("test_sandbox_security_{}", nanos));
         let _ = fs::remove_dir_all(&sandbox).await;
         fs::create_dir_all(&sandbox).await.unwrap();
@@ -42,7 +45,9 @@ mod sandbox_tests {
     #[tokio::test]
     async fn test_path_valid_relative() {
         let sandbox = setup_sandbox().await;
-        fs::write(sandbox.join("valid.txt"), "content").await.unwrap();
+        fs::write(sandbox.join("valid.txt"), "content")
+            .await
+            .unwrap();
         let guard = PathGuard::new(&sandbox).unwrap();
         let result = guard.validate("valid.txt");
         assert!(result.is_ok());
@@ -52,7 +57,9 @@ mod sandbox_tests {
     async fn test_path_valid_subdirectory() {
         let sandbox = setup_sandbox().await;
         fs::create_dir_all(sandbox.join("subdir")).await.unwrap();
-        fs::write(sandbox.join("subdir/file.txt"), "content").await.unwrap();
+        fs::write(sandbox.join("subdir/file.txt"), "content")
+            .await
+            .unwrap();
         let guard = PathGuard::new(&sandbox).unwrap();
         let result = guard.validate("subdir/file.txt");
         assert!(result.is_ok());
@@ -61,43 +68,64 @@ mod sandbox_tests {
     #[test]
     fn test_command_guard_semicolon() {
         let cmd = vec!["ls".to_string(), ";".to_string(), "rm".to_string()];
-        assert!(matches!(CommandGuard::validate(&cmd), Err(ToolError::SandboxViolation(_))));
+        assert!(matches!(
+            CommandGuard::validate(&cmd),
+            Err(ToolError::SandboxViolation(_))
+        ));
     }
 
     #[test]
     fn test_command_guard_ampersand() {
         let cmd = vec!["ls".to_string(), "&".to_string()];
-        assert!(matches!(CommandGuard::validate(&cmd), Err(ToolError::SandboxViolation(_))));
+        assert!(matches!(
+            CommandGuard::validate(&cmd),
+            Err(ToolError::SandboxViolation(_))
+        ));
     }
 
     #[test]
     fn test_command_guard_redirect_output() {
         let cmd = vec!["ls".to_string(), ">".to_string(), "file.txt".to_string()];
-        assert!(matches!(CommandGuard::validate(&cmd), Err(ToolError::SandboxViolation(_))));
+        assert!(matches!(
+            CommandGuard::validate(&cmd),
+            Err(ToolError::SandboxViolation(_))
+        ));
     }
 
     #[test]
     fn test_command_guard_redirect_input() {
         let cmd = vec!["cat".to_string(), "<".to_string(), "file.txt".to_string()];
-        assert!(matches!(CommandGuard::validate(&cmd), Err(ToolError::SandboxViolation(_))));
+        assert!(matches!(
+            CommandGuard::validate(&cmd),
+            Err(ToolError::SandboxViolation(_))
+        ));
     }
 
     #[test]
     fn test_command_guard_backtick() {
         let cmd = vec!["echo".to_string(), "`whoami`".to_string()];
-        assert!(matches!(CommandGuard::validate(&cmd), Err(ToolError::SandboxViolation(_))));
+        assert!(matches!(
+            CommandGuard::validate(&cmd),
+            Err(ToolError::SandboxViolation(_))
+        ));
     }
 
     #[test]
     fn test_command_guard_dollar_paren() {
         let cmd = vec!["echo".to_string(), "$(whoami)".to_string()];
-        assert!(matches!(CommandGuard::validate(&cmd), Err(ToolError::SandboxViolation(_))));
+        assert!(matches!(
+            CommandGuard::validate(&cmd),
+            Err(ToolError::SandboxViolation(_))
+        ));
     }
 
     #[test]
     fn test_command_guard_chmod() {
         let cmd = vec!["chmod".to_string(), "777".to_string(), "file".to_string()];
-        assert!(matches!(CommandGuard::validate(&cmd), Err(ToolError::SandboxViolation(_))));
+        assert!(matches!(
+            CommandGuard::validate(&cmd),
+            Err(ToolError::SandboxViolation(_))
+        ));
     }
 
     #[test]
@@ -120,7 +148,11 @@ mod sandbox_tests {
 
     #[test]
     fn test_command_guard_grep_pattern() {
-        let cmd = vec!["grep".to_string(), "pattern".to_string(), "file.txt".to_string()];
+        let cmd = vec![
+            "grep".to_string(),
+            "pattern".to_string(),
+            "file.txt".to_string(),
+        ];
         assert!(CommandGuard::validate(&cmd).is_ok());
     }
 
@@ -133,7 +165,10 @@ mod sandbox_tests {
     #[test]
     fn test_command_guard_case_sensitive() {
         let cmd = vec!["LS".to_string()];
-        assert!(matches!(CommandGuard::validate(&cmd), Err(ToolError::SandboxViolation(_))));
+        assert!(matches!(
+            CommandGuard::validate(&cmd),
+            Err(ToolError::SandboxViolation(_))
+        ));
     }
 
     #[test]
@@ -147,9 +182,9 @@ mod sandbox_tests {
         let sandbox = setup_sandbox().await;
         fs::write(sandbox.join("file1.txt"), "").await.unwrap();
         fs::write(sandbox.join("file2.txt"), "").await.unwrap();
-        
+
         let guard = PathGuard::new(&sandbox).unwrap();
-        
+
         assert!(guard.validate("file1.txt").is_ok());
         assert!(guard.validate("file2.txt").is_ok());
         assert!(guard.validate("nonexistent.txt").is_err());
@@ -167,7 +202,11 @@ mod sandbox_tests {
         ];
 
         for cmd in valid_commands {
-            assert!(CommandGuard::validate(&cmd).is_ok(), "Failed for: {:?}", cmd);
+            assert!(
+                CommandGuard::validate(&cmd).is_ok(),
+                "Failed for: {:?}",
+                cmd
+            );
         }
     }
 
@@ -182,7 +221,11 @@ mod sandbox_tests {
         ];
 
         for cmd in invalid_commands {
-            assert!(CommandGuard::validate(&cmd).is_err(), "Should fail for: {:?}", cmd);
+            assert!(
+                CommandGuard::validate(&cmd).is_err(),
+                "Should fail for: {:?}",
+                cmd
+            );
         }
     }
 
@@ -190,7 +233,7 @@ mod sandbox_tests {
     async fn test_path_guard_new_file_validation() {
         let sandbox = setup_sandbox().await;
         let guard = PathGuard::new(&sandbox).unwrap();
-        
+
         let result = guard.validate_new("new_file.txt");
         assert!(result.is_ok());
     }
@@ -199,7 +242,7 @@ mod sandbox_tests {
     async fn test_path_guard_new_file_traversal() {
         let sandbox = setup_sandbox().await;
         let guard = PathGuard::new(&sandbox).unwrap();
-        
+
         let result = guard.validate_new("../outside.txt");
         assert!(matches!(result, Err(ToolError::SandboxViolation(_))));
     }
@@ -209,7 +252,7 @@ mod sandbox_tests {
         let sandbox = setup_sandbox().await;
         fs::create_dir_all(sandbox.join("a/b/c")).await.unwrap();
         fs::write(sandbox.join("a/b/c/deep.txt"), "").await.unwrap();
-        
+
         let guard = PathGuard::new(&sandbox).unwrap();
         let result = guard.validate("a/b/c/deep.txt");
         assert!(result.is_ok());

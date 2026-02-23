@@ -1,11 +1,11 @@
 #[cfg(test)]
 mod tests {
-    use hypr_claw_tools::*;
-    use hypr_claw_tools::tools::*;
-    use hypr_claw_tools::sandbox::*;
-    use std::sync::Arc;
-    use serde_json::json;
     use async_trait::async_trait;
+    use hypr_claw_tools::sandbox::*;
+    use hypr_claw_tools::tools::*;
+    use hypr_claw_tools::*;
+    use serde_json::json;
+    use std::sync::Arc;
 
     // Mock implementations for testing
     struct MockPermissionEngine;
@@ -30,7 +30,7 @@ mod tests {
         let tool = EchoTool;
         let ctx = ExecutionContext::new("test_session".into(), 5000);
         let input = json!({"message": "hello"});
-        
+
         let result = tool.execute(ctx, input.clone()).await.unwrap();
         assert!(result.success);
         assert_eq!(result.output, Some(input));
@@ -48,7 +48,7 @@ mod tests {
     async fn test_registry_register_and_get() {
         let mut registry = ToolRegistryImpl::new();
         registry.register(Arc::new(EchoTool));
-        
+
         assert!(registry.get("echo").is_some());
         assert!(registry.get("nonexistent").is_none());
     }
@@ -58,7 +58,7 @@ mod tests {
         let mut registry = ToolRegistryImpl::new();
         registry.register(Arc::new(EchoTool));
         registry.register(Arc::new(ShellExecTool));
-        
+
         let tools = registry.list();
         assert_eq!(tools.len(), 2);
         assert!(tools.contains(&"echo".to_string()));
@@ -152,7 +152,7 @@ mod tests {
         let tool = ShellExecTool;
         let ctx = ExecutionContext::new("test_session".into(), 100);
         let input = json!({"cmd": ["sleep", "10"]});
-        
+
         let result = tool.execute(ctx, input).await;
         assert!(matches!(result, Err(ToolError::Timeout)));
     }
@@ -220,11 +220,9 @@ mod tests {
             5000,
         );
 
-        let result = dispatcher.dispatch(
-            "session".into(),
-            "nonexistent".into(),
-            json!({}),
-        ).await;
+        let result = dispatcher
+            .dispatch("session".into(), "nonexistent".into(), json!({}))
+            .await;
 
         assert!(matches!(result, Err(ToolError::ValidationError(_))));
     }
@@ -233,7 +231,7 @@ mod tests {
     async fn test_dispatcher_echo_success() {
         let mut registry = ToolRegistryImpl::new();
         registry.register(Arc::new(EchoTool));
-        
+
         let dispatcher = ToolDispatcherImpl::new(
             Arc::new(registry),
             Arc::new(MockPermissionEngine) as Arc<dyn PermissionEngine>,
@@ -241,11 +239,10 @@ mod tests {
             5000,
         );
 
-        let result = dispatcher.dispatch(
-            "session".into(),
-            "echo".into(),
-            json!({"message": "test"}),
-        ).await.unwrap();
+        let result = dispatcher
+            .dispatch("session".into(), "echo".into(), json!({"message": "test"}))
+            .await
+            .unwrap();
 
         assert!(result.success);
     }

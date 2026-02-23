@@ -1,11 +1,11 @@
 //! Load and stress testing for runtime.
 
-use hypr_claw_runtime::*;
-use hypr_claw_runtime::LLMClientType;
 use async_trait::async_trait;
+use hypr_claw_runtime::LLMClientType;
+use hypr_claw_runtime::*;
 use serde_json::json;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::time::Duration;
 
 struct StressSessionStore {
@@ -57,11 +57,11 @@ impl ToolDispatcher for StressToolDispatcher {
         _session_key: &str,
     ) -> Result<serde_json::Value, RuntimeError> {
         self.executions.fetch_add(1, Ordering::SeqCst);
-        
+
         if self.should_fail {
             return Err(RuntimeError::ToolError("Simulated failure".to_string()));
         }
-        
+
         Ok(json!({"result": "ok"}))
     }
 }
@@ -73,24 +73,22 @@ impl ToolRegistry for StressToolRegistry {
         vec!["test".to_string()]
     }
 
-        fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
-            vec![
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": "echo",
-                        "description": "Echo a message",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "message": {"type": "string"}
-                            },
-                            "required": ["message"]
-                        }
-                    }
-                })
-            ]
-        }
+    fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
+        vec![json!({
+            "type": "function",
+            "function": {
+                "name": "echo",
+                "description": "Echo a message",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string"}
+                    },
+                    "required": ["message"]
+                }
+            }
+        })]
+    }
 }
 
 struct StressSummarizer;
@@ -137,7 +135,9 @@ async fn test_concurrent_sessions_stress() {
         let agent_loop = agent_loop.clone();
         let handle = tokio::spawn(async move {
             let session_id = format!("test:user{}", i);
-            let result = agent_loop.run(&session_id, "agent1", "system", "test").await;
+            let result = agent_loop
+                .run(&session_id, "agent1", "system", "test")
+                .await;
             result.is_ok()
         });
         handles.push(handle);
@@ -157,9 +157,12 @@ async fn test_concurrent_sessions_stress() {
     println!("Successful sessions: {}", success_count);
     println!("Total operations: {}", operations.load(Ordering::SeqCst));
     println!("Total executions: {}", executions.load(Ordering::SeqCst));
-    
+
     // Verify no deadlocks (test completed) and operations were attempted
-    assert!(operations.load(Ordering::SeqCst) > 0, "Should have attempted operations");
+    assert!(
+        operations.load(Ordering::SeqCst) > 0,
+        "Should have attempted operations"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -174,15 +177,15 @@ async fn test_mixed_success_failure() {
     let lock_manager = Arc::new(StressLockManager {
         acquisitions: acquisitions.clone(),
     });
-    
+
     // Mix of failing and succeeding dispatchers
     let mut handles = vec![];
-    
+
     for i in 0..100 {
         let session_store = session_store.clone();
         let lock_manager = lock_manager.clone();
         let executions = executions.clone();
-        
+
         let handle = tokio::spawn(async move {
             let should_fail = i % 3 == 0;
             let dispatcher = Arc::new(StressToolDispatcher {
@@ -203,13 +206,10 @@ async fn test_mixed_success_failure() {
                 5,
             );
 
-            let result = agent_loop.run(
-                &format!("test:session{}", i),
-                "agent1",
-                "system",
-                "test",
-            ).await;
-            
+            let result = agent_loop
+                .run(&format!("test:session{}", i), "agent1", "system", "test")
+                .await;
+
             result.is_ok()
         });
         handles.push(handle);
@@ -224,9 +224,12 @@ async fn test_mixed_success_failure() {
 
     println!("Mixed test - successes: {}", success_count);
     println!("Total operations: {}", operations.load(Ordering::SeqCst));
-    
+
     // Should have attempted operations (may not succeed without agent configs)
-    assert!(operations.load(Ordering::SeqCst) > 0, "Should have attempted operations");
+    assert!(
+        operations.load(Ordering::SeqCst) > 0,
+        "Should have attempted operations"
+    );
 }
 
 #[tokio::test]
@@ -269,7 +272,9 @@ async fn test_concurrency_limit_enforcement() {
         let handle = tokio::spawn(async move {
             // Add delay to ensure concurrency
             tokio::time::sleep(Duration::from_millis(10)).await;
-            controller.execute(&format!("user{}", i), "default", "test").await
+            controller
+                .execute(&format!("user{}", i), "default", "test")
+                .await
         });
         handles.push(handle);
     }

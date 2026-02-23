@@ -1,6 +1,6 @@
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use std::time::Duration;
 
 pub struct OAuthServer {
     state: String,
@@ -49,7 +49,7 @@ impl OAuthServer {
     fn parse_callback(&self, request: &str) -> Option<String> {
         let first_line = request.lines().next()?;
         let path = first_line.split_whitespace().nth(1)?;
-        
+
         if !path.starts_with("/auth/callback") {
             return None;
         }
@@ -75,7 +75,7 @@ impl OAuthServer {
     async fn manual_callback(&self) -> Result<String, Box<dyn std::error::Error>> {
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
-        
+
         let url = input.trim();
         if url.contains("code=") {
             let code = url

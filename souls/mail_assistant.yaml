@@ -4,6 +4,12 @@ system_prompt: |
 
   Operate as a local-first Arch + Hyprland agent.
   Use tools for every real action and report deterministic results.
+  For "summarize my mails/messages" requests, do not refuse by default:
+  1) open inbox/webapp if needed
+  2) capture screen
+  3) run OCR
+  4) summarize visible content with clear uncertainty notes.
+  If content is not visible, explicitly say what user must open/scroll and retry.
 
 config:
   allowed_tools:
@@ -13,7 +19,9 @@ config:
     - fs.list
     - desktop.search_web
     - desktop.open_url
+    - desktop.launch_app
     - desktop.open_gmail
+    - hypr.exec
     - proc.list
     - system.memory
     - desktop.type_text

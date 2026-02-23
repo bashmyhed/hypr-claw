@@ -1,6 +1,6 @@
-use std::path::{Path, PathBuf};
-use std::fs;
 use crate::error::ToolError;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 
@@ -17,23 +17,28 @@ impl PathGuard {
 
     pub fn validate(&self, path: impl AsRef<Path>) -> Result<PathBuf, ToolError> {
         let path = path.as_ref();
-        
+
         // Reject absolute paths immediately
         if path.is_absolute() {
-            return Err(ToolError::SandboxViolation("Absolute paths not allowed".into()));
+            return Err(ToolError::SandboxViolation(
+                "Absolute paths not allowed".into(),
+            ));
         }
 
         // Check for path traversal before canonicalization
         let path_str = path.to_string_lossy();
         if path_str.contains("..") {
-            return Err(ToolError::SandboxViolation("Path traversal detected".into()));
+            return Err(ToolError::SandboxViolation(
+                "Path traversal detected".into(),
+            ));
         }
 
         let full_path = self.sandbox_root.join(path);
-        
+
         // Canonicalize to resolve symlinks
-        let canonical = fs::canonicalize(&full_path)
-            .map_err(|_| ToolError::SandboxViolation("Path does not exist or is inaccessible".into()))?;
+        let canonical = fs::canonicalize(&full_path).map_err(|_| {
+            ToolError::SandboxViolation("Path does not exist or is inaccessible".into())
+        })?;
 
         // Verify boundary after canonicalization (TOCTOU protection)
         if !canonical.starts_with(&self.sandbox_root) {
@@ -52,26 +57,30 @@ impl PathGuard {
 
     pub fn validate_new(&self, path: impl AsRef<Path>) -> Result<PathBuf, ToolError> {
         let path = path.as_ref();
-        
+
         // Reject absolute paths
         if path.is_absolute() {
-            return Err(ToolError::SandboxViolation("Absolute paths not allowed".into()));
+            return Err(ToolError::SandboxViolation(
+                "Absolute paths not allowed".into(),
+            ));
         }
 
         // Check for traversal
         let path_str = path.to_string_lossy();
         if path_str.contains("..") {
-            return Err(ToolError::SandboxViolation("Path traversal detected".into()));
+            return Err(ToolError::SandboxViolation(
+                "Path traversal detected".into(),
+            ));
         }
 
         let full_path = self.sandbox_root.join(path);
-        
+
         // Validate parent directory
         if let Some(parent) = full_path.parent() {
             if parent.exists() {
                 let canonical_parent = fs::canonicalize(parent)
                     .map_err(|_| ToolError::SandboxViolation("Invalid parent directory".into()))?;
-                
+
                 if !canonical_parent.starts_with(&self.sandbox_root) {
                     return Err(ToolError::SandboxViolation("Path escapes sandbox".into()));
                 }
@@ -81,7 +90,7 @@ impl PathGuard {
         // Ensure the path itself doesn't escape via symlink
         // Check each component of the full path, starting from the sandbox root
         let mut current = self.sandbox_root.clone();
-        
+
         // Get the relative path from sandbox_root to full_path
         if let Ok(relative) = full_path.strip_prefix(&self.sandbox_root) {
             for component in relative.components() {
@@ -89,7 +98,9 @@ impl PathGuard {
                 if current.exists() {
                     if let Ok(canonical) = fs::canonicalize(&current) {
                         if !canonical.starts_with(&self.sandbox_root) {
-                            return Err(ToolError::SandboxViolation("Symlink escapes sandbox".into()));
+                            return Err(ToolError::SandboxViolation(
+                                "Symlink escapes sandbox".into(),
+                            ));
                         }
                     }
                 }

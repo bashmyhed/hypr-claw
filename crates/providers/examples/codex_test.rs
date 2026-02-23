@@ -1,7 +1,7 @@
 //! Example demonstrating Codex OAuth authentication and usage
 
-use hypr_claw_providers::{CodexProvider, LLMProvider};
 use hypr_claw_memory::types::{ContextData, OAuthTokens};
+use hypr_claw_providers::{CodexProvider, LLMProvider};
 use std::path::Path;
 
 #[tokio::main]
@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         println!("[Codex] No stored tokens found. Starting OAuth flow...\n");
         let tokens = provider.authenticate().await?;
-        
+
         // Store tokens in context
         context.oauth_tokens = Some(OAuthTokens {
             access_token: tokens.access_token.clone(),
@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             expires_at: tokens.expires_at,
             account_id: tokens.account_id.clone(),
         });
-        
+
         // Save context
         std::fs::create_dir_all("./data/context")?;
         std::fs::write(context_path, serde_json::to_string_pretty(&context)?)?;
@@ -53,13 +53,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test the provider
     println!("\n🧪 Testing Codex provider...\n");
-    
-    let messages = vec![
-        hypr_claw_providers::traits::Message {
-            role: "user".to_string(),
-            content: "Write a simple Rust function that calculates fibonacci numbers recursively.".to_string(),
-        },
-    ];
+
+    let messages = vec![hypr_claw_providers::traits::Message {
+        role: "user".to_string(),
+        content: "Write a simple Rust function that calculates fibonacci numbers recursively."
+            .to_string(),
+    }];
 
     println!("[Codex] Sending request...");
     let response = provider.generate(&messages, None).await?;
@@ -67,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n╔══════════════════════════════════════════════════════════════════╗");
     println!("║                         Response                                  ║");
     println!("╚══════════════════════════════════════════════════════════════════╝\n");
-    
+
     if let Some(content) = response.content {
         println!("{}", content);
     } else {

@@ -1,14 +1,14 @@
-use async_trait::async_trait;
-use serde::Deserialize;
-use serde_json::json;
-use tokio::process::Command;
-use tokio::time::{timeout, Duration};
-use std::process::Stdio;
 use crate::error::ToolError;
 use crate::execution_context::ExecutionContext;
 use crate::sandbox::CommandGuard;
 use crate::tools::base::{Tool, ToolResult};
 use crate::traits::PermissionTier;
+use async_trait::async_trait;
+use serde::Deserialize;
+use serde_json::json;
+use std::process::Stdio;
+use tokio::process::Command;
+use tokio::time::{timeout, Duration};
 
 #[derive(Deserialize)]
 struct ShellExecInput {
@@ -49,8 +49,8 @@ impl Tool for ShellExecTool {
         ctx: ExecutionContext,
         input: serde_json::Value,
     ) -> Result<ToolResult, ToolError> {
-        let input: ShellExecInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::ValidationError(e.to_string()))?;
+        let input: ShellExecInput =
+            serde_json::from_value(input).map_err(|e| ToolError::ValidationError(e.to_string()))?;
 
         if input.cmd.is_empty() {
             return Err(ToolError::ValidationError("Empty command".into()));
@@ -102,7 +102,11 @@ impl Tool for ShellExecTool {
                 "stderr": stderr,
                 "exit_code": output.status.code()
             })),
-            error: if output.status.success() { None } else { Some(stderr) },
+            error: if output.status.success() {
+                None
+            } else {
+                Some(stderr)
+            },
         })
     }
 }

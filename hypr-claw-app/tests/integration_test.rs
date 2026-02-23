@@ -11,9 +11,9 @@ async fn test_system_initialization() {
         let _ = std::fs::create_dir_all("./test_data/sessions");
         let _ = std::fs::create_dir_all("./test_data/agents");
     });
-    
+
     assert!(result.is_ok(), "System initialization should not panic");
-    
+
     // Cleanup
     let _ = std::fs::remove_dir_all("./test_data");
 }
@@ -22,26 +22,24 @@ async fn test_system_initialization() {
 async fn test_concurrent_controller_access() {
     // This test verifies that RuntimeController can handle concurrent access
     // without deadlocks or panics
-    
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        async {
-            // Simulate multiple concurrent accesses
-            let mut handles = vec![];
-            for _ in 0..5 {
-                let handle = tokio::spawn(async {
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    "ok"
-                });
-                handles.push(handle);
-            }
-            
-            for handle in handles {
-                let _ = handle.await;
-            }
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        // Simulate multiple concurrent accesses
+        let mut handles = vec![];
+        for _ in 0..5 {
+            let handle = tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                "ok"
+            });
+            handles.push(handle);
         }
-    ).await;
-    
+
+        for handle in handles {
+            let _ = handle.await;
+        }
+    })
+    .await;
+
     assert!(result.is_ok(), "Concurrent access should not deadlock");
 }
 
@@ -55,7 +53,7 @@ fn test_error_types() {
         RuntimeError::SessionError("test".to_string()),
         RuntimeError::ConfigError("test".to_string()),
     ];
-    
+
     for error in errors {
         let msg = error.to_string();
         assert!(!msg.is_empty(), "Error message should not be empty");

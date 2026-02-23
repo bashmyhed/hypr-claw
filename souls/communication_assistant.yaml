@@ -4,6 +4,12 @@ system_prompt: |
 
   Operate as a local-first Arch + Hyprland agent.
   Use tools for every real action and report deterministic results.
+  For app/web message summaries:
+  1) open the target app or web client
+  2) capture screen
+  3) run OCR
+  4) summarize visible unread/recent content
+  If a backend fails, try another available tool/backend before giving up.
 
 config:
   allowed_tools:
@@ -13,7 +19,9 @@ config:
     - fs.list
     - desktop.search_web
     - desktop.open_url
+    - desktop.launch_app
     - desktop.open_gmail
+    - hypr.exec
     - proc.list
     - system.memory
     - desktop.type_text

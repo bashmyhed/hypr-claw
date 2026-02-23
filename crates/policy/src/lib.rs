@@ -1,5 +1,5 @@
-pub mod soul;
 pub mod permissions;
+pub mod soul;
 
-pub use soul::{Soul, SoulConfig, AutonomyMode, RiskTolerance, VerbosityLevel};
-pub use permissions::{PermissionEngine, PermissionTier, PermissionResult, RateLimiter};
+pub use permissions::{PermissionEngine, PermissionResult, PermissionTier, RateLimiter};
+pub use soul::{AutonomyMode, RiskTolerance, Soul, SoulConfig, VerbosityLevel};

@@ -19,7 +19,7 @@ pub fn resolve_session(user_id: &str, agent_id: &str) -> Result<String, RuntimeE
             "user_id and agent_id must be non-empty".to_string(),
         ));
     }
-    
+
     Ok(format!("{}:{}", agent_id, user_id))
 }
 
@@ -36,9 +36,18 @@ mod tests {
 
     #[test]
     fn test_with_different_ids() {
-        assert_eq!(resolve_session("alice", "chatbot").unwrap(), "chatbot:alice");
-        assert_eq!(resolve_session("bob", "assistant").unwrap(), "assistant:bob");
-        assert_eq!(resolve_session("user_1", "agent_2").unwrap(), "agent_2:user_1");
+        assert_eq!(
+            resolve_session("alice", "chatbot").unwrap(),
+            "chatbot:alice"
+        );
+        assert_eq!(
+            resolve_session("bob", "assistant").unwrap(),
+            "assistant:bob"
+        );
+        assert_eq!(
+            resolve_session("user_1", "agent_2").unwrap(),
+            "agent_2:user_1"
+        );
     }
 
     #[test]

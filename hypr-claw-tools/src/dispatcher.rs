@@ -1,12 +1,12 @@
+use crate::error::ToolError;
+use crate::execution_context::ExecutionContext;
+use crate::registry::ToolRegistryImpl;
+use crate::tools::ToolResult;
+use crate::traits::{AuditLogger, PermissionDecision, PermissionEngine, PermissionRequest};
+use serde_json::json;
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
-use tracing::{info, warn, error};
-use serde_json::json;
-use crate::registry::ToolRegistryImpl;
-use crate::execution_context::ExecutionContext;
-use crate::error::ToolError;
-use crate::tools::ToolResult;
-use crate::traits::{PermissionEngine, AuditLogger, PermissionDecision, PermissionRequest};
+use tracing::{error, info, warn};
 
 pub struct ToolDispatcherImpl {
     registry: Arc<ToolRegistryImpl>,
@@ -36,16 +36,23 @@ impl ToolDispatcherImpl {
         tool_name: String,
         input: serde_json::Value,
     ) -> Result<ToolResult, ToolError> {
-        info!("Dispatching tool: {} for session: {}", tool_name, session_key);
+        info!(
+            "Dispatching tool: {} for session: {}",
+            tool_name, session_key
+        );
 
         // 1. Lookup tool
-        let tool = self.registry.get(&tool_name)
+        let tool = self
+            .registry
+            .get(&tool_name)
             .ok_or_else(|| ToolError::ValidationError(format!("Tool not found: {}", tool_name)))?;
 
         // 2. Validate input against schema
         let schema = tool.schema();
         if !self.validate_input(&input, &schema) {
-            return Err(ToolError::ValidationError("Input does not match schema".into()));
+            return Err(ToolError::ValidationError(
+                "Input does not match schema".into(),
+            ));
         }
 
         // 3. Build permission request
@@ -66,13 +73,11 @@ impl ToolDispatcherImpl {
                 warn!("Permission denied: {}", reason);
                 Err(ToolError::PermissionDenied(reason.clone()))
             }
-            PermissionDecision::RequireApproval(msg) => {
-                Ok(ToolResult {
-                    success: false,
-                    output: Some(json!({"approval_required": true, "message": msg})),
-                    error: Some("Approval required".into()),
-                })
-            }
+            PermissionDecision::RequireApproval(msg) => Ok(ToolResult {
+                success: false,
+                output: Some(json!({"approval_required": true, "message": msg})),
+                error: Some("Approval required".into()),
+            }),
             PermissionDecision::Allow => {
                 let ctx = ExecutionContext::new(session_key.clone(), self.timeout_ms);
                 self.execute_with_protection(tool, ctx, input.clone()).await
@@ -98,14 +103,15 @@ impl ToolDispatcherImpl {
         if input.is_null() {
             return false;
         }
-        
+
         // Check for excessively large payloads
         if let Ok(serialized) = serde_json::to_string(input) {
-            if serialized.len() > 1_000_000 { // 1MB limit
+            if serialized.len() > 1_000_000 {
+                // 1MB limit
                 return false;
             }
         }
-        
+
         true
     }
 
@@ -116,11 +122,9 @@ impl ToolDispatcherImpl {
         input: serde_json::Value,
     ) -> Result<ToolResult, ToolError> {
         let timeout_ms = ctx.timeout_ms;
-        
+
         // Execute with timeout and panic isolation
-        let exec_future = async move {
-            tool.execute(ctx, input).await
-        };
+        let exec_future = async move { tool.execute(ctx, input).await };
 
         // Spawn task to isolate panics
         let handle = tokio::spawn(exec_future);

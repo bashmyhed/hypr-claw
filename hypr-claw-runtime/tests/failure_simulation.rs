@@ -2,8 +2,8 @@
 //! Failure simulation tests for catastrophic scenarios.
 
 use async_trait::async_trait;
-use hypr_claw_runtime::*;
 use hypr_claw_runtime::LLMClientType;
+use hypr_claw_runtime::*;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -41,7 +41,9 @@ impl SessionStore for MockSessionStore {
 
     async fn save(&self, session_key: &str, messages: &[Message]) -> Result<(), RuntimeError> {
         if self.should_fail_save {
-            return Err(RuntimeError::SessionError("Storage write failed".to_string()));
+            return Err(RuntimeError::SessionError(
+                "Storage write failed".to_string(),
+            ));
         }
         let mut storage = self.storage.lock().unwrap();
         storage.insert(session_key.to_string(), messages.to_vec());
@@ -117,24 +119,22 @@ impl ToolRegistry for MockToolRegistry {
         vec![]
     }
 
-        fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
-            vec![
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": "echo",
-                        "description": "Echo a message",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "message": {"type": "string"}
-                            },
-                            "required": ["message"]
-                        }
-                    }
-                })
-            ]
-        }
+    fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
+        vec![json!({
+            "type": "function",
+            "function": {
+                "name": "echo",
+                "description": "Echo a message",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string"}
+                    },
+                    "required": ["message"]
+                }
+            }
+        })]
+    }
 }
 
 struct MockSummarizer;
@@ -151,19 +151,16 @@ async fn test_llm_timeout() {
     let temp_path = temp_dir.path();
 
     std::fs::write(temp_path.join("agent.md"), "You are helpful.").unwrap();
-    std::fs::write(
-        temp_path.join("agent.yaml"),
-        "id: agent\nsoul: agent.md\n",
-    )
-    .unwrap();
+    std::fs::write(temp_path.join("agent.yaml"), "id: agent\nsoul: agent.md\n").unwrap();
 
     let store = Arc::new(MockSessionStore::new());
     let lock_mgr = Arc::new(MockLockManager::new());
     let dispatcher = Arc::new(NormalToolDispatcher);
     let registry = Arc::new(MockToolRegistry);
-    
+
     // LLM client with very short timeout will fail
-    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
+    let llm_client =
+        LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, MockSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -179,13 +176,13 @@ async fn test_llm_timeout() {
     let controller = RuntimeController::new(agent_loop, temp_path.to_str().unwrap().to_string());
 
     let result = controller.execute("user1", "agent", "Test").await;
-    
+
     // Should fail with LLM error
     assert!(result.is_err());
-    
+
     // Lock must be released
     assert!(!lock_mgr.is_locked("agent:user1"));
-    
+
     // Verify lock was acquired and released
     let log = lock_mgr.get_call_log();
     assert!(log.iter().any(|(action, _)| action == "acquire"));
@@ -200,17 +197,14 @@ async fn test_llm_malformed_response() {
     let temp_path = temp_dir.path();
 
     std::fs::write(temp_path.join("agent.md"), "You are helpful.").unwrap();
-    std::fs::write(
-        temp_path.join("agent.yaml"),
-        "id: agent\nsoul: agent.md\n",
-    )
-    .unwrap();
+    std::fs::write(temp_path.join("agent.yaml"), "id: agent\nsoul: agent.md\n").unwrap();
 
     let store = Arc::new(MockSessionStore::new());
     let lock_mgr = Arc::new(MockLockManager::new());
     let dispatcher = Arc::new(NormalToolDispatcher);
     let registry = Arc::new(MockToolRegistry);
-    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
+    let llm_client =
+        LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, MockSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -226,14 +220,14 @@ async fn test_llm_malformed_response() {
     let controller = RuntimeController::new(agent_loop, temp_path.to_str().unwrap().to_string());
 
     let result = controller.execute("user1", "agent", "Test").await;
-    
+
     // Should fail cleanly
     assert!(result.is_err());
-    
+
     // No panic occurred
     // Lock released
     assert!(!lock_mgr.is_locked("agent:user1"));
-    
+
     // Session should not be corrupted (empty or unchanged)
     let session = store.load("agent:user1").await.unwrap();
     // Session might have user message but no corrupted state
@@ -246,17 +240,14 @@ async fn test_session_store_write_failure() {
     let temp_path = temp_dir.path();
 
     std::fs::write(temp_path.join("agent.md"), "You are helpful.").unwrap();
-    std::fs::write(
-        temp_path.join("agent.yaml"),
-        "id: agent\nsoul: agent.md\n",
-    )
-    .unwrap();
+    std::fs::write(temp_path.join("agent.yaml"), "id: agent\nsoul: agent.md\n").unwrap();
 
     let store = Arc::new(MockSessionStore::with_save_failure());
     let lock_mgr = Arc::new(MockLockManager::new());
     let dispatcher = Arc::new(NormalToolDispatcher);
     let registry = Arc::new(MockToolRegistry);
-    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
+    let llm_client =
+        LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, MockSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -272,13 +263,13 @@ async fn test_session_store_write_failure() {
     let controller = RuntimeController::new(agent_loop, temp_path.to_str().unwrap().to_string());
 
     let result = controller.execute("user1", "agent", "Test").await;
-    
+
     // Should fail with error
     assert!(result.is_err());
-    
+
     // Lock must be released even on save failure
     assert!(!lock_mgr.is_locked("agent:user1"));
-    
+
     // No infinite retry - should fail once
     let log = lock_mgr.get_call_log();
     let acquire_count = log.iter().filter(|(action, _)| action == "acquire").count();
@@ -291,17 +282,14 @@ async fn test_infinite_tool_recursion() {
     let temp_path = temp_dir.path();
 
     std::fs::write(temp_path.join("agent.md"), "You are helpful.").unwrap();
-    std::fs::write(
-        temp_path.join("agent.yaml"),
-        "id: agent\nsoul: agent.md\n",
-    )
-    .unwrap();
+    std::fs::write(temp_path.join("agent.yaml"), "id: agent\nsoul: agent.md\n").unwrap();
 
     let store = Arc::new(MockSessionStore::new());
     let lock_mgr = Arc::new(MockLockManager::new());
     let dispatcher = Arc::new(NormalToolDispatcher);
     let registry = Arc::new(MockToolRegistry);
-    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
+    let llm_client =
+        LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, MockSummarizer);
 
     // Set low max_iterations to test enforcement
@@ -318,7 +306,7 @@ async fn test_infinite_tool_recursion() {
     let controller = RuntimeController::new(agent_loop, temp_path.to_str().unwrap().to_string());
 
     let result = controller.execute("user1", "agent", "Test").await;
-    
+
     // Should fail with max iterations error
     assert!(result.is_err());
     if let Err(e) = result {
@@ -326,7 +314,7 @@ async fn test_infinite_tool_recursion() {
         // Should mention max iterations or LLM error
         assert!(error_msg.contains("Max iterations") || error_msg.contains("LLM"));
     }
-    
+
     // Lock must be released
     assert!(!lock_mgr.is_locked("agent:user1"));
 }
@@ -337,17 +325,14 @@ async fn test_concurrent_failure_no_deadlock() {
     let temp_path = temp_dir.path();
 
     std::fs::write(temp_path.join("agent.md"), "You are helpful.").unwrap();
-    std::fs::write(
-        temp_path.join("agent.yaml"),
-        "id: agent\nsoul: agent.md\n",
-    )
-    .unwrap();
+    std::fs::write(temp_path.join("agent.yaml"), "id: agent\nsoul: agent.md\n").unwrap();
 
     let store = Arc::new(MockSessionStore::new());
     let lock_mgr = Arc::new(MockLockManager::new());
     let dispatcher = Arc::new(NormalToolDispatcher);
     let registry = Arc::new(MockToolRegistry);
-    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
+    let llm_client =
+        LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, MockSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -396,17 +381,17 @@ async fn test_concurrent_failure_no_deadlock() {
 #[tokio::test]
 async fn test_lock_release_count_matches() {
     let lock_mgr = MockLockManager::new();
-    
+
     // Simulate multiple acquire/release cycles
     for i in 0..10 {
         let key = format!("session:{}", i);
         lock_mgr.acquire(&key).await.unwrap();
         lock_mgr.release(&key).await;
     }
-    
+
     let log = lock_mgr.get_call_log();
     let acquire_count = log.iter().filter(|(action, _)| action == "acquire").count();
     let release_count = log.iter().filter(|(action, _)| action == "release").count();
-    
+
     assert_eq!(acquire_count, release_count, "Lock leak detected");
 }
