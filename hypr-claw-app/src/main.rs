@@ -21,6 +21,8 @@ enum UiInputEvent {
     Skip,
 }
 
+const MAX_RECOVERY_ATTEMPTS: u32 = 2;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse CLI arguments
@@ -333,6 +335,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &session_key,
         &active_soul_id,
         &agent_state.active_thread_id,
+        &agent_state.autonomy_mode,
     );
 
     // Setup interrupt signal (Ctrl+C interrupts current request, does not exit process)
@@ -567,6 +570,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("Use: trust on | trust off");
                         continue;
                     }
+                    "autonomy" | "/autonomy" => {
+                        println!("Autonomy mode: {}", agent_state.autonomy_mode.as_str());
+                        println!("Use: autonomy prompt_first | autonomy guarded");
+                        continue;
+                    }
                     "queue" | "/queue" => {
                         print_supervisor_queue(&agent_state);
                         continue;
@@ -594,6 +602,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         _ => {
                             println!("Use: trust on | trust off");
                         }
+                    }
+                    continue;
+                }
+
+                if let Some(mode) = input
+                    .strip_prefix("autonomy ")
+                    .or_else(|| input.strip_prefix("/autonomy "))
+                    .map(str::trim)
+                {
+                    match mode {
+                        "prompt_first" | "prompt" | "openclaw" => {
+                            agent_state.autonomy_mode = AutonomyMode::PromptFirst;
+                            persist_agent_os_state(&mut context, &agent_state);
+                            context_manager.save(&context).await?;
+                            println!(
+                                "✅ Autonomy mode set to prompt_first (OpenClaw-style prompt-driven)"
+                            );
+                        }
+                        "guarded" => {
+                            agent_state.autonomy_mode = AutonomyMode::Guarded;
+                            persist_agent_os_state(&mut context, &agent_state);
+                            context_manager.save(&context).await?;
+                            println!("✅ Autonomy mode set to guarded (deterministic recovery)");
+                        }
+                        _ => println!("Use: autonomy prompt_first | autonomy guarded"),
                     }
                     continue;
                 }
@@ -928,13 +961,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let task_session_key = thread_session_key(&session_key, &agent_state.active_thread_id);
                 let focused_tools = focused_tools_for_input(&effective_input, &active_allowed_tools);
-                let use_focused = !focused_tools.is_empty() && focused_tools.len() < active_allowed_tools.len();
+                let use_focused = matches!(agent_state.autonomy_mode, AutonomyMode::Guarded)
+                    && !focused_tools.is_empty()
+                    && focused_tools.len() < active_allowed_tools.len();
                 if use_focused {
                     runtime_registry.set_allowed_tools(focused_tools.clone());
                 }
 
-                let class_budget = execution_budget_for_class(&task_class);
-                let watchdog_timeout = watchdog_timeout_for_class(&task_class);
+                let class_budget =
+                    execution_budget_for_class(&task_class, &agent_state.autonomy_mode);
+                let watchdog_timeout =
+                    watchdog_timeout_for_class(&task_class, &agent_state.autonomy_mode);
                 let effective_max_iterations = active_soul
                     .max_iterations
                     .min(class_budget.max_iterations)
@@ -951,8 +988,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 agent_state.reliability.updated_at = Some(chrono::Utc::now().timestamp());
 
                 println!(
-                    "plan> analyze -> execute tools -> report  [soul={} class={} iter={} timeout={}s]",
+                    "plan> analyze -> execute tools -> report  [soul={} mode={} class={} iter={} timeout={}s]",
                     active_soul_id,
+                    agent_state.autonomy_mode.as_str(),
                     task_class.as_str(),
                     agent_loop.max_iterations(),
                     watchdog_timeout.as_secs()
@@ -962,6 +1000,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &system_prompt,
                     &agent_state.onboarding.system_profile,
                     &active_allowed_tools,
+                    &agent_state.autonomy_mode,
                 );
 
                 let mut run_result = run_with_interrupt_and_timeout(
@@ -979,9 +1018,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     runtime_registry.set_allowed_tools(active_allowed_tools.clone());
                 }
 
-                if let Err(err) = &run_result {
-                    let err_msg = err.to_string();
-                    let is_tool_enforcement_error = err_msg.contains("Tool invocation required but not performed");
+                loop {
+                    let err_msg = match &run_result {
+                        Ok(_) => break,
+                        Err(err) => err.to_string(),
+                    };
+
+                    if fallback_attempts >= MAX_RECOVERY_ATTEMPTS {
+                        agent_state.reliability.last_stage =
+                            "recovery_budget_exhausted".to_string();
+                        agent_state.reliability.fallback_attempts = fallback_attempts;
+                        break;
+                    }
+
+                    let is_tool_enforcement_error =
+                        err_msg.contains("Tool invocation required but not performed");
                     let is_provider_argument_error =
                         err_msg.contains("INVALID_ARGUMENT") || err_msg.contains("400 Bad Request");
                     let is_watchdog_timeout_error =
@@ -990,21 +1041,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         || err_msg.contains("iteration limit")
                         || err_msg.contains("iterations (")
                         || err_msg.contains("reached after");
-                    let is_tool_execution_error =
-                        err_msg.contains("Tool error:")
-                            || err_msg.contains("dispatcher error")
-                            || err_msg.contains("tool failed");
+                    let is_tool_execution_error = err_msg.contains("Tool error:")
+                        || err_msg.contains("dispatcher error")
+                        || err_msg.contains("tool failed");
+
+                    let mut recovery_prompt: Option<String> = None;
+                    fallback_attempts += 1;
+                    agent_state.reliability.fallback_attempts = fallback_attempts;
+                    let prompt_first_mode =
+                        matches!(agent_state.autonomy_mode, AutonomyMode::PromptFirst);
 
                     if is_tool_enforcement_error {
-                        fallback_attempts += 1;
                         agent_state.reliability.last_stage = "recovery_tool_enforcement".to_string();
-                        agent_state.reliability.fallback_attempts = fallback_attempts;
                         if let Some(candidate_soul_id) =
                             auto_select_soul_id(&effective_input, &available_souls)
                         {
                             if candidate_soul_id != active_soul_id {
                                 if let Ok((profile, resolved_tools)) =
-                                    switch_soul(&candidate_soul_id, &runtime_registry, &agent_tools).await
+                                    switch_soul(&candidate_soul_id, &runtime_registry, &agent_tools)
+                                        .await
                                 {
                                     active_soul = profile;
                                     active_soul_id = candidate_soul_id;
@@ -1019,75 +1074,93 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     context.active_soul_id = active_soul_id.clone();
                                     println!(
                                         "🧠 Recovery soul switch: {} (max_iter={})",
-                                        active_soul_id,
-                                        active_soul.max_iterations
+                                        active_soul_id, active_soul.max_iterations
                                     );
                                     turn_system_prompt = augment_system_prompt_for_turn(
                                         &system_prompt,
                                         &agent_state.onboarding.system_profile,
                                         &active_allowed_tools,
+                                        &agent_state.autonomy_mode,
                                     );
                                 }
                             }
                         }
-                        let fallback_playbook =
-                            fallback_playbook_for_input(&effective_input, &active_allowed_tools);
-                        let retry_prompt = format!(
-                            "{}\n\nExecute this now using available tools. Do not answer with explanation-only text.\nFallback strategy (deterministic):\n{}\nIf one tool fails, immediately move to the next fallback tool.",
-                            effective_input,
-                            fallback_playbook
-                        );
-                        run_result = run_with_interrupt_and_timeout(
-                            &agent_loop,
-                            &task_session_key,
-                            &agent_name,
-                            &turn_system_prompt,
-                            &retry_prompt,
-                            &interrupt,
-                            watchdog_timeout,
-                        )
-                        .await;
-                    } else if is_provider_argument_error {
-                        fallback_attempts += 1;
-                        agent_state.reliability.last_stage = "recovery_provider_argument".to_string();
-                        agent_state.reliability.fallback_attempts = fallback_attempts;
-                        let emergency_tools = emergency_tool_subset(&effective_input, &active_allowed_tools);
-                        if !emergency_tools.is_empty() && emergency_tools.len() < active_allowed_tools.len() {
-                            runtime_registry.set_allowed_tools(emergency_tools);
-                            run_result = run_with_interrupt_and_timeout(
-                                &agent_loop,
-                                &task_session_key,
-                                &agent_name,
-                                &turn_system_prompt,
-                                &effective_input,
-                                &interrupt,
-                                watchdog_timeout,
-                            )
-                            .await;
-                            runtime_registry.set_allowed_tools(active_allowed_tools.clone());
+                        if prompt_first_mode {
+                            recovery_prompt = Some(format!(
+                                "{}\n\nPrompt-first recovery mode:\n1) choose the best next tool dynamically from allowed_tools_now\n2) if a call fails, change strategy and try a different tool path\n3) avoid repeating identical failed calls\n4) do not return explanation-only text; act until done or truly blocked.",
+                                effective_input
+                            ));
+                        } else {
+                            let fallback_playbook =
+                                fallback_playbook_for_input(&effective_input, &active_allowed_tools);
+                            recovery_prompt = Some(format!(
+                                "{}\n\nExecute this now using available tools. Do not answer with explanation-only text.\nFallback strategy (deterministic):\n{}\nIf one tool fails, immediately move to the next fallback tool.",
+                                effective_input, fallback_playbook
+                            ));
                         }
-                    } else if is_max_iterations_error || is_tool_execution_error || is_watchdog_timeout_error {
-                        fallback_attempts += 1;
+                    } else if is_provider_argument_error {
+                        agent_state.reliability.last_stage = "recovery_provider_argument".to_string();
+                        if prompt_first_mode {
+                            recovery_prompt = Some(format!(
+                                "{}\n\nProvider-compat recovery:\n1) emit exactly one tool call with strict JSON arguments\n2) avoid verbose narration\n3) if parsing fails, choose a simpler tool call and continue.",
+                                effective_input
+                            ));
+                        } else {
+                            let emergency_tools =
+                                emergency_tool_subset(&effective_input, &active_allowed_tools);
+                            if !emergency_tools.is_empty()
+                                && emergency_tools.len() < active_allowed_tools.len()
+                            {
+                                runtime_registry.set_allowed_tools(emergency_tools);
+                                run_result = run_with_interrupt_and_timeout(
+                                    &agent_loop,
+                                    &task_session_key,
+                                    &agent_name,
+                                    &turn_system_prompt,
+                                    &effective_input,
+                                    &interrupt,
+                                    watchdog_timeout,
+                                )
+                                .await;
+                                runtime_registry.set_allowed_tools(active_allowed_tools.clone());
+                                continue;
+                            }
+                        }
+                    } else if is_max_iterations_error
+                        || is_tool_execution_error
+                        || is_watchdog_timeout_error
+                    {
                         agent_state.reliability.last_stage = "recovery_runtime".to_string();
-                        agent_state.reliability.fallback_attempts = fallback_attempts;
-                        let fallback_playbook =
-                            fallback_playbook_for_input(&effective_input, &active_allowed_tools);
-                        let recovery_prompt = format!(
-                            "{}\n\nRecovery mode:\n1) keep working with available tools\n2) if a tool fails, pick the next fallback tool in this table:\n{}\n3) end with final status and exact remaining blocker only if no alternative worked.",
-                            effective_input,
-                            fallback_playbook
-                        );
+                        if prompt_first_mode {
+                            recovery_prompt = Some(format!(
+                                "{}\n\nOpenClaw-style recovery:\n1) continue autonomously with new tool strategy\n2) avoid previously failing call patterns\n3) prefer direct actions over explanation\n4) return final status only when the task is actually done or clearly blocked.",
+                                effective_input
+                            ));
+                        } else {
+                            let fallback_playbook =
+                                fallback_playbook_for_input(&effective_input, &active_allowed_tools);
+                            recovery_prompt = Some(format!(
+                                "{}\n\nRecovery mode:\n1) keep working with available tools\n2) if a tool fails, pick the next fallback tool in this table:\n{}\n3) end with final status and exact remaining blocker only if no alternative worked.",
+                                effective_input, fallback_playbook
+                            ));
+                        }
+                    }
+
+                    if let Some(prompt) = recovery_prompt {
                         run_result = run_with_interrupt_and_timeout(
                             &agent_loop,
                             &task_session_key,
                             &agent_name,
                             &turn_system_prompt,
-                            &recovery_prompt,
+                            &prompt,
                             &interrupt,
                             watchdog_timeout,
                         )
                         .await;
+                        continue;
                     }
+
+                    break;
                 }
 
                 agent_loop.set_max_iterations(active_soul.max_iterations);
@@ -1098,7 +1171,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         agent_state.reliability.last_stage = "completed".to_string();
                         agent_state.reliability.fallback_attempts = fallback_attempts;
                         agent_state.reliability.last_duration_ms = run_elapsed_ms;
-                        agent_state.reliability.last_break_reason = "none".to_string();
+                        agent_state.reliability.last_break_reason = "STOP_NONE".to_string();
                         agent_state.reliability.last_error.clear();
                         agent_state.reliability.updated_at = Some(chrono::Utc::now().timestamp());
                         if let Some(task_id) = &supervisor_task_id {
@@ -1118,25 +1191,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     Err(e) => {
                         let error_msg = e.to_string();
-                        let break_reason = if error_msg.contains("Interrupted by user") {
-                            "user_interrupt"
-                        } else if error_msg.to_lowercase().contains("watchdog timeout") {
-                            "watchdog_timeout"
-                        } else if error_msg.contains("repetitive tool loop") {
-                            "tool_loop"
-                        } else if error_msg.contains("consecutive tool failures") {
-                            "tool_failure_streak"
-                        } else if error_msg.contains("Max iterations")
-                            || error_msg.contains("iteration limit")
-                        {
-                            "max_iterations"
-                        } else {
-                            "runtime_error"
-                        };
+                        let stop_code = resolve_stop_code(&error_msg, fallback_attempts);
+                        let hint = remediation_hint_for_stop_code(stop_code, &effective_input);
                         agent_state.reliability.last_stage = "failed".to_string();
                         agent_state.reliability.fallback_attempts = fallback_attempts;
                         agent_state.reliability.last_duration_ms = run_elapsed_ms;
-                        agent_state.reliability.last_break_reason = break_reason.to_string();
+                        agent_state.reliability.last_break_reason = stop_code.to_string();
                         agent_state.reliability.last_error = error_msg.clone();
                         agent_state.reliability.updated_at = Some(chrono::Utc::now().timestamp());
                         if let Some(task_id) = &supervisor_task_id {
@@ -1148,7 +1208,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if error_msg.contains("Interrupted by user") {
                             println!("⏹ Request interrupted by user.\n");
                         } else {
-                            eprintln!("❌ Error: {}\n", e);
+                            eprintln!("❌ Error [{}]: {}", stop_code, e);
+                            if !hint.is_empty() {
+                                eprintln!("💡 Next step: {}", hint);
+                            }
+                            eprintln!();
                         }
                     }
                 }
@@ -1443,6 +1507,7 @@ fn build_tui_snapshot(
         user: format!("{} ({})", display_name(agent_state, user_id), user_id),
         session: session_key.to_string(),
         soul: active_soul_id.to_string(),
+        autonomy_mode: agent_state.autonomy_mode.as_str().to_string(),
         thread: agent_state.active_thread_id.clone(),
         souls_count: soul_count,
         task_counts: (task_list.len(), running, done, failed),
@@ -1595,6 +1660,7 @@ fn print_console_bootstrap(
     session_key: &str,
     active_soul_id: &str,
     active_thread_id: &str,
+    autonomy_mode: &AutonomyMode,
 ) {
     println!(
         "{}",
@@ -1629,6 +1695,10 @@ fn print_console_bootstrap(
         )
     );
     println!(
+        "║ Autonomy : {:<54} ║",
+        truncate_for_table(autonomy_mode.as_str(), 54)
+    );
+    println!(
         "{}",
         ui_accent("╠════════════════════════════════════════════════════════════════════╣")
     );
@@ -1637,7 +1707,7 @@ fn print_console_bootstrap(
         ui_dim(&format!(
             "║ Commands: {:<58}║",
             truncate_for_table(
-                "help, status, dashboard, /tui, /models, soul, /task, queue...",
+                "help, status, dashboard, /tui, /models, soul, /task, queue, autonomy...",
                 58
             )
         ))
@@ -1660,6 +1730,7 @@ fn print_help() {
     println!("    repl | /repl          Return to standard prompt mode");
     println!("    scan                  Re-run standard/deep system learning scan");
     println!("    trust on|off          Toggle trusted full-auto execution mode");
+    println!("    autonomy <mode>       Set autonomy mode (prompt_first|guarded)");
     println!("    clear                 Clear terminal");
     println!("    interrupt             Show interrupt hint (Ctrl+C)");
     println!("    exit | quit           Exit agent");
@@ -1747,6 +1818,66 @@ fn reliability_summary(state: &AgentOsState) -> String {
     )
 }
 
+fn stop_code_for_error(error_msg: &str) -> &'static str {
+    let lower = error_msg.to_lowercase();
+    if lower.contains("interrupted by user") {
+        "STOP_USER_INTERRUPT"
+    } else if lower.contains("watchdog timeout") {
+        "STOP_WATCHDOG_TIMEOUT"
+    } else if lower.contains("repetitive tool loop") {
+        "STOP_TOOL_LOOP"
+    } else if lower.contains("consecutive tool failures") {
+        "STOP_TOOL_FAILURE_STREAK"
+    } else if lower.contains("tool invocation required but not performed")
+        || lower.contains("no tool call completed successfully")
+    {
+        "STOP_TOOL_ENFORCEMENT"
+    } else if lower.contains("invalid_argument") || lower.contains("400 bad request") {
+        "STOP_PROVIDER_ARGUMENT"
+    } else if lower.contains("max iterations")
+        || lower.contains("iteration limit")
+        || lower.contains("reached after")
+    {
+        "STOP_MAX_ITERATIONS"
+    } else {
+        "STOP_RUNTIME_ERROR"
+    }
+}
+
+fn resolve_stop_code(error_msg: &str, fallback_attempts: u32) -> &'static str {
+    let base = stop_code_for_error(error_msg);
+    if fallback_attempts >= MAX_RECOVERY_ATTEMPTS && base != "STOP_USER_INTERRUPT" {
+        "STOP_RECOVERY_BUDGET_EXHAUSTED"
+    } else {
+        base
+    }
+}
+
+fn remediation_hint_for_stop_code(stop_code: &str, input: &str) -> String {
+    let lower = input.to_lowercase();
+    match stop_code {
+        "STOP_USER_INTERRUPT" => "Request was interrupted. Re-run the task or queue it with 'queue add <prompt>'.".to_string(),
+        "STOP_WATCHDOG_TIMEOUT" => "Task exceeded time budget. Break it into smaller steps or run one concrete action per prompt.".to_string(),
+        "STOP_TOOL_LOOP" => "Model got stuck on repeated tool calls. Try a more specific prompt with exact app/path/target window.".to_string(),
+        "STOP_TOOL_FAILURE_STREAK" => "Multiple tools failed in a row. Verify required apps/backends are installed and available in PATH.".to_string(),
+        "STOP_TOOL_ENFORCEMENT" => "No valid actionable tool path was produced. Use an imperative prompt like 'open X', 'create Y', or 'run Z'.".to_string(),
+        "STOP_PROVIDER_ARGUMENT" => "Provider rejected the request format. Switch model with '/models' or retry after reducing prompt complexity.".to_string(),
+        "STOP_MAX_ITERATIONS" => {
+            if lower.contains("gmail") || lower.contains("telegram") || lower.contains("mail") {
+                "For inbox/chat tasks, request one concrete step first (open + capture), then ask for summary in next prompt.".to_string()
+            } else if lower.contains("wallpaper") {
+                "Specify one backend explicitly (e.g. 'use caelestia wallpaper -f <path>').".to_string()
+            } else if lower.contains("vscode") || lower.contains("code") {
+                "Set an explicit launch command for your editor in system profile/capabilities, then retry.".to_string()
+            } else {
+                "Task planning hit iteration budget. Narrow the scope and retry with fewer combined actions.".to_string()
+            }
+        }
+        "STOP_RECOVERY_BUDGET_EXHAUSTED" => "Automatic recovery attempts were exhausted. Retry with a narrower prompt or switch soul/model.".to_string(),
+        _ => "Unexpected runtime failure. Run 'status' and 'dashboard' for telemetry, then retry with a narrower prompt.".to_string(),
+    }
+}
+
 fn print_status_panel(
     session_key: &str,
     agent_name: &str,
@@ -1795,6 +1926,10 @@ fn print_status_panel(
         "  Soul         : {} (auto: {})",
         ui_accent(active_soul_id),
         if soul_auto { "on" } else { "off" }
+    );
+    println!(
+        "  Autonomy     : {}",
+        ui_info(agent_state.autonomy_mode.as_str())
     );
     println!(
         "  Trust Mode   : {}",
@@ -1912,6 +2047,11 @@ fn print_runtime_dashboard(
         soul_count,
         ui_dim("Active thread:"),
         ui_dim(&agent_state.active_thread_id)
+    );
+    println!(
+        "{} {}",
+        ui_dim("Autonomy:"),
+        ui_info(agent_state.autonomy_mode.as_str())
     );
     println!(
         "{} {} | {} {}",
@@ -2342,6 +2482,8 @@ struct AgentOsState {
     supervisor: SupervisorState,
     #[serde(default)]
     reliability: ReliabilityState,
+    #[serde(default = "default_autonomy_mode")]
+    autonomy_mode: AutonomyMode,
 }
 
 impl Default for AgentOsState {
@@ -2353,6 +2495,7 @@ impl Default for AgentOsState {
             active_thread_id: "task-1".to_string(),
             supervisor: SupervisorState::default(),
             reliability: ReliabilityState::default(),
+            autonomy_mode: default_autonomy_mode(),
         }
     }
 }
@@ -2387,6 +2530,26 @@ impl Default for ReliabilityState {
             updated_at: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AutonomyMode {
+    PromptFirst,
+    Guarded,
+}
+
+impl AutonomyMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::PromptFirst => "prompt_first",
+            Self::Guarded => "guarded",
+        }
+    }
+}
+
+fn default_autonomy_mode() -> AutonomyMode {
+    AutonomyMode::PromptFirst
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3418,19 +3581,33 @@ fn classify_supervised_task_class(input: &str) -> SupervisedTaskClass {
     SupervisedTaskClass::Question
 }
 
-fn execution_budget_for_class(class: &SupervisedTaskClass) -> ExecutionBudget {
-    match class {
-        SupervisedTaskClass::Question => ExecutionBudget { max_iterations: 8 },
-        SupervisedTaskClass::Action => ExecutionBudget { max_iterations: 16 },
-        SupervisedTaskClass::Investigation => ExecutionBudget { max_iterations: 24 },
+fn execution_budget_for_class(class: &SupervisedTaskClass, mode: &AutonomyMode) -> ExecutionBudget {
+    match mode {
+        AutonomyMode::PromptFirst => match class {
+            SupervisedTaskClass::Question => ExecutionBudget { max_iterations: 14 },
+            SupervisedTaskClass::Action => ExecutionBudget { max_iterations: 28 },
+            SupervisedTaskClass::Investigation => ExecutionBudget { max_iterations: 40 },
+        },
+        AutonomyMode::Guarded => match class {
+            SupervisedTaskClass::Question => ExecutionBudget { max_iterations: 8 },
+            SupervisedTaskClass::Action => ExecutionBudget { max_iterations: 16 },
+            SupervisedTaskClass::Investigation => ExecutionBudget { max_iterations: 24 },
+        },
     }
 }
 
-fn watchdog_timeout_for_class(class: &SupervisedTaskClass) -> Duration {
-    match class {
-        SupervisedTaskClass::Question => Duration::from_secs(45),
-        SupervisedTaskClass::Action => Duration::from_secs(90),
-        SupervisedTaskClass::Investigation => Duration::from_secs(150),
+fn watchdog_timeout_for_class(class: &SupervisedTaskClass, mode: &AutonomyMode) -> Duration {
+    match mode {
+        AutonomyMode::PromptFirst => match class {
+            SupervisedTaskClass::Question => Duration::from_secs(60),
+            SupervisedTaskClass::Action => Duration::from_secs(120),
+            SupervisedTaskClass::Investigation => Duration::from_secs(210),
+        },
+        AutonomyMode::Guarded => match class {
+            SupervisedTaskClass::Question => Duration::from_secs(45),
+            SupervisedTaskClass::Action => Duration::from_secs(90),
+            SupervisedTaskClass::Investigation => Duration::from_secs(150),
+        },
     }
 }
 
@@ -3634,6 +3811,7 @@ fn augment_system_prompt_for_turn(
     base_prompt: &str,
     profile: &Value,
     allowed_tools: &HashSet<String>,
+    autonomy_mode: &AutonomyMode,
 ) -> String {
     let distro = profile
         .pointer("/platform/distro_name")
@@ -3705,10 +3883,19 @@ fn augment_system_prompt_for_turn(
 
     let mut tools = allowed_tools.iter().cloned().collect::<Vec<String>>();
     tools.sort();
+    let policy_block = match autonomy_mode {
+        AutonomyMode::PromptFirst => {
+            "Execution policy:\n1) Perform actions using tools, not explanation.\n2) You control fallback order dynamically; adapt tool strategy from observed failures.\n3) Prefer one decisive tool call at a time with valid JSON input.\n4) Use runtime hints for app launch commands (launcher_commands/vscode_hint).\n5) End with concise result and what changed.\n6) Stop only when truly blocked after trying multiple tool paths."
+        }
+        AutonomyMode::Guarded => {
+            "Execution policy:\n1) Perform actions using tools, not explanation.\n2) If a tool fails, choose an alternative backend/tool and continue.\n3) Use runtime hints for app launch commands (launcher_commands/vscode_hint).\n4) End with concise result and what changed.\n5) Only stop as blocked after trying alternatives available in runtime context."
+        }
+    };
 
     format!(
-        "{}\n\nRuntime context:\n- distro: {}\n- kernel: {}\n- active_workspace: {}\n- wallpaper_backends: {}\n- screenshot_backends: {}\n- input_backends: {}\n- vscode_hint: {}\n- launcher_commands: {}\n- known_projects: {}\n- known_downloads_dir: {}\n- allowed_tools_now: {}\n\nExecution policy:\n1) Perform actions using tools, not explanation.\n2) If a tool fails, choose an alternative backend/tool and continue.\n3) Use runtime hints for app launch commands (launcher_commands/vscode_hint).\n4) End with concise result and what changed.\n5) Only stop as blocked after trying alternatives available in runtime context.",
+        "{}\n\nRuntime context:\n- autonomy_mode: {}\n- distro: {}\n- kernel: {}\n- active_workspace: {}\n- wallpaper_backends: {}\n- screenshot_backends: {}\n- input_backends: {}\n- vscode_hint: {}\n- launcher_commands: {}\n- known_projects: {}\n- known_downloads_dir: {}\n- allowed_tools_now: {}\n\n{}",
         base_prompt,
+        autonomy_mode.as_str(),
         distro,
         kernel,
         workspace,
@@ -3722,7 +3909,8 @@ fn augment_system_prompt_for_turn(
             .pointer("/paths/downloads")
             .and_then(|v| v.as_str())
             .unwrap_or(""),
-        tools.join(", ")
+        tools.join(", "),
+        policy_block
     )
 }
 
@@ -4228,5 +4416,101 @@ impl hypr_claw_runtime::Summarizer for SimpleSummarizer {
         messages: &[hypr_claw_runtime::Message],
     ) -> Result<String, hypr_claw_runtime::RuntimeError> {
         Ok(format!("Summary of {} messages", messages.len()))
+    }
+}
+
+#[cfg(test)]
+mod reliability_policy_tests {
+    use super::*;
+
+    #[test]
+    fn stop_code_mapping_basic_paths() {
+        assert_eq!(
+            stop_code_for_error("Interrupted by user"),
+            "STOP_USER_INTERRUPT"
+        );
+        assert_eq!(
+            stop_code_for_error("Execution watchdog timeout after 90s"),
+            "STOP_WATCHDOG_TIMEOUT"
+        );
+        assert_eq!(
+            stop_code_for_error("Detected repetitive tool loop for 'desktop.capture_screen'"),
+            "STOP_TOOL_LOOP"
+        );
+        assert_eq!(
+            stop_code_for_error("Too many consecutive tool failures. Halting this run."),
+            "STOP_TOOL_FAILURE_STREAK"
+        );
+        assert_eq!(
+            stop_code_for_error("Tool invocation required but not performed"),
+            "STOP_TOOL_ENFORCEMENT"
+        );
+        assert_eq!(
+            stop_code_for_error("Action requested, but no tool call completed successfully."),
+            "STOP_TOOL_ENFORCEMENT"
+        );
+        assert_eq!(
+            stop_code_for_error("HTTP error: 400 Bad Request. Details: INVALID_ARGUMENT"),
+            "STOP_PROVIDER_ARGUMENT"
+        );
+        assert_eq!(
+            stop_code_for_error("Max iterations (16) reached after 16 tool calls"),
+            "STOP_MAX_ITERATIONS"
+        );
+        assert_eq!(
+            stop_code_for_error("some unknown runtime"),
+            "STOP_RUNTIME_ERROR"
+        );
+    }
+
+    #[test]
+    fn stop_code_resolution_respects_recovery_budget() {
+        let err = "Max iterations (16) reached after 16 tool calls";
+        assert_eq!(resolve_stop_code(err, 0), "STOP_MAX_ITERATIONS");
+        assert_eq!(
+            resolve_stop_code(err, MAX_RECOVERY_ATTEMPTS),
+            "STOP_RECOVERY_BUDGET_EXHAUSTED"
+        );
+    }
+
+    #[test]
+    fn stop_code_resolution_keeps_user_interrupt_code() {
+        assert_eq!(
+            resolve_stop_code("Interrupted by user", MAX_RECOVERY_ATTEMPTS + 3),
+            "STOP_USER_INTERRUPT"
+        );
+    }
+
+    #[test]
+    fn remediation_hints_are_contextual() {
+        let mail_hint =
+            remediation_hint_for_stop_code("STOP_MAX_ITERATIONS", "open gmail and summarise");
+        assert!(mail_hint.contains("open + capture"));
+
+        let wallpaper_hint =
+            remediation_hint_for_stop_code("STOP_MAX_ITERATIONS", "change wallpaper");
+        assert!(wallpaper_hint.contains("caelestia"));
+
+        let code_hint = remediation_hint_for_stop_code("STOP_MAX_ITERATIONS", "open vscode");
+        assert!(code_hint.contains("launch command"));
+
+        let generic_hint = remediation_hint_for_stop_code("STOP_RUNTIME_ERROR", "anything");
+        assert!(generic_hint.contains("status"));
+    }
+
+    #[test]
+    fn autonomy_defaults_to_prompt_first() {
+        assert_eq!(default_autonomy_mode(), AutonomyMode::PromptFirst);
+    }
+
+    #[test]
+    fn prompt_first_budget_is_higher_than_guarded() {
+        let q_prompt =
+            execution_budget_for_class(&SupervisedTaskClass::Question, &AutonomyMode::PromptFirst)
+                .max_iterations;
+        let q_guarded =
+            execution_budget_for_class(&SupervisedTaskClass::Question, &AutonomyMode::Guarded)
+                .max_iterations;
+        assert!(q_prompt > q_guarded);
     }
 }

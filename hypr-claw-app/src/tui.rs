@@ -33,6 +33,7 @@ pub struct TuiSnapshot {
     pub user: String,
     pub session: String,
     pub soul: String,
+    pub autonomy_mode: String,
     pub thread: String,
     pub souls_count: usize,
     pub task_counts: (usize, usize, usize, usize),
@@ -150,6 +151,16 @@ fn render(snapshot: &TuiSnapshot) -> io::Result<()> {
                 snapshot.token_usage.0,
                 snapshot.token_usage.1,
                 snapshot.token_usage.2
+            )
+        )
+    );
+    println!(
+        "{}",
+        row(
+            width,
+            &format!(
+                "Autonomy {}",
+                truncate(&snapshot.autonomy_mode, width.saturating_sub(14))
             )
         )
     );
@@ -394,6 +405,7 @@ fn build_right_panel(snapshot: &TuiSnapshot, width: usize, max_lines: usize) -> 
     out.push("  :q,/q   close command center".to_string());
     out.push("  :exit   quit hypr-claw".to_string());
     out.push("  :r,/r   refresh panels".to_string());
+    out.push("  autonomy <mode> switch mode".to_string());
     out.push("  type any command to execute".to_string());
     out.push(String::new());
     out.push(" Queue".to_string());
