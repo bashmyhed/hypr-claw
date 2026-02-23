@@ -262,14 +262,44 @@ impl LLMClient {
     }
 
     fn retry_delay_for_error(&self, attempt: u32, err: &RuntimeError) -> Duration {
-        let msg = err.to_string().to_lowercase();
-        if msg.contains("rate limit") || msg.contains("429") {
+        let msg = err.to_string();
+        let lower = msg.to_lowercase();
+        if lower.contains("rate limit")
+            || lower.contains("too many requests")
+            || lower.contains("resource_exhausted")
+            || lower.contains("429")
+        {
             if let Some(seconds) = extract_retry_seconds(&msg) {
                 return Duration::from_secs(seconds.min(90));
             }
             return Duration::from_secs((2_u64.saturating_pow(attempt + 1)).min(30));
         }
         Duration::from_millis((250_u64.saturating_mul(2_u64.saturating_pow(attempt))).min(5000))
+    }
+
+    fn should_retry_error(&self, err: &RuntimeError) -> bool {
+        let msg = err.to_string().to_lowercase();
+
+        if msg.contains("authentication failed")
+            || msg.contains("401 unauthorized")
+            || msg.contains("invalid endpoint (404")
+            || msg.contains("invalid_argument")
+            || msg.contains("400 bad request")
+            || msg.contains("models endpoint returned no model ids")
+        {
+            return false;
+        }
+
+        // Do not keep retrying on hard quota exhaustion.
+        if msg.contains("generaterequestsperday")
+            || msg.contains("perday")
+            || msg.contains("daily quota")
+            || msg.contains("quota exhausted")
+        {
+            return false;
+        }
+
+        true
     }
 
     /// Call LLM service with retry logic.
@@ -304,8 +334,10 @@ impl LLMClient {
         }
 
         let mut last_error = None;
+        let mut attempts_used = 0u32;
 
         for attempt in 0..=self.max_retries {
+            attempts_used = attempt + 1;
             debug!("LLM call attempt {}/{}", attempt + 1, self.max_retries + 1);
 
             match self.call_once(system_prompt, messages, tool_schemas).await {
@@ -315,10 +347,13 @@ impl LLMClient {
                 }
                 Err(e) => {
                     warn!("LLM call failed (attempt {}): {}", attempt + 1, e);
+                    let retryable = self.should_retry_error(&e);
                     let delay = self.retry_delay_for_error(attempt, &e);
                     last_error = Some(e);
-                    if attempt < self.max_retries {
+                    if retryable && attempt < self.max_retries {
                         tokio::time::sleep(delay).await;
+                    } else {
+                        break;
                     }
                 }
             }
@@ -328,7 +363,7 @@ impl LLMClient {
 
         Err(RuntimeError::LLMError(format!(
             "LLM call failed after {} attempts: {}",
-            self.max_retries + 1,
+            attempts_used,
             last_error
                 .map(|e| e.to_string())
                 .unwrap_or_else(|| "Unknown error".to_string())
@@ -602,14 +637,20 @@ impl LLMClient {
 }
 
 fn extract_retry_seconds(msg: &str) -> Option<u64> {
-    for token in msg.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '.') {
-        if let Some(stripped) = token.strip_suffix('s') {
-            if let Ok(v) = stripped.parse::<u64>() {
-                if v > 0 {
-                    return Some(v);
+    let mut num = String::new();
+    for ch in msg.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            num.push(ch);
+            continue;
+        }
+        if matches!(ch, 's' | 'S') && !num.is_empty() {
+            if let Ok(v) = num.parse::<f64>() {
+                if v > 0.0 {
+                    return Some(v.ceil() as u64);
                 }
             }
         }
+        num.clear();
     }
     None
 }
@@ -818,5 +859,21 @@ mod tests {
     fn test_parse_inline_tool_call_non_tool_text() {
         let parsed = parse_inline_tool_call("Hello, how can I help?");
         assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn test_extract_retry_seconds_supports_fractional_values() {
+        let msg = "Please retry in 44.155866472s.";
+        assert_eq!(extract_retry_seconds(msg), Some(45));
+    }
+
+    #[test]
+    fn test_should_retry_error_skips_daily_quota_exhaustion() {
+        let client = LLMClient::new("http://localhost:8000".to_string(), 2);
+        let err = RuntimeError::LLMError(
+            "Rate limit exceeded. quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+                .to_string(),
+        );
+        assert!(!client.should_retry_error(&err));
     }
 }

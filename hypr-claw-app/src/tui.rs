@@ -1,5 +1,8 @@
 use std::cmp::min;
 use std::io::{self, Write};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug)]
@@ -23,6 +26,8 @@ pub struct SupervisorTaskRow {
     pub id: String,
     pub state: String,
     pub class: String,
+    pub resources: String,
+    pub background_task_id: String,
     pub prompt: String,
 }
 
@@ -35,6 +40,7 @@ pub struct TuiSnapshot {
     pub soul: String,
     pub autonomy_mode: String,
     pub thread: String,
+    pub live_mode: bool,
     pub souls_count: usize,
     pub task_counts: (usize, usize, usize, usize),
     pub supervisor_counts: (usize, usize, usize, usize, usize),
@@ -50,6 +56,11 @@ pub struct TuiSnapshot {
     pub supervisor_tasks: Vec<SupervisorTaskRow>,
     pub action_feed: Vec<String>,
     pub recent_messages: Vec<String>,
+    pub action_feed_window: String,
+    pub recent_messages_window: String,
+    pub task_log: Vec<String>,
+    pub task_log_window: String,
+    pub actionable_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -72,24 +83,37 @@ fn paint(text: &str, style: &str) -> String {
     }
 }
 
-pub fn run_command_center(snapshot: &TuiSnapshot) -> io::Result<TuiOutcome> {
+pub fn run_command_center(
+    snapshot: &TuiSnapshot,
+    refresh_interval: Duration,
+) -> io::Result<TuiOutcome> {
     render(snapshot)?;
 
     println!(
         "{}",
         paint(
-            "Command Center Input: type command and Enter | :q|/q close | :exit exit app | :r|/r refresh",
+            &command_prompt_hint(snapshot.live_mode, refresh_interval),
             DIM
         )
     );
     print!("{}", paint("tui> ", ACCENT));
     io::stdout().flush()?;
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let cmd = input.trim().to_string();
+    let cmd = if snapshot.live_mode {
+        match poll_line_with_timeout(refresh_interval)? {
+            Some(cmd) => cmd,
+            None => return Ok(TuiOutcome::Refresh),
+        }
+    } else {
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        input.trim().to_string()
+    };
 
-    if cmd.is_empty() || cmd == ":q" || cmd == "/q" {
+    if cmd.is_empty() {
+        return Ok(TuiOutcome::Refresh);
+    }
+    if cmd == ":q" || cmd == "/q" {
         return Ok(TuiOutcome::Close);
     }
     if cmd == ":exit" || cmd == "/exit" {
@@ -98,16 +122,154 @@ pub fn run_command_center(snapshot: &TuiSnapshot) -> io::Result<TuiOutcome> {
     if cmd == ":r" || cmd == ":refresh" || cmd == "/r" || cmd == "/refresh" {
         return Ok(TuiOutcome::Refresh);
     }
+    if let Some(mapped) = map_tui_shortcut(&cmd) {
+        return Ok(TuiOutcome::Submit(mapped));
+    }
 
     Ok(TuiOutcome::Submit(cmd))
 }
 
+fn map_tui_shortcut(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let direct = match value {
+        ":help" | "/help" => Some("/help"),
+        ":status" | "/status" => Some("/status"),
+        ":dashboard" | ":dash" | "/dashboard" => Some("/dashboard"),
+        ":tasks" | "/tasks" => Some("/tasks"),
+        ":models" | "/models" => Some("/models"),
+        ":queue" | "/queue" => Some("/queue"),
+        ":queue-run" | "/queue-run" => Some("/queue run"),
+        ":queue-status" | "/queue-status" => Some("/queue status"),
+        ":queue-clear" | "/queue-clear" => Some("/queue clear"),
+        ":queue-prune" | "/queue-prune" => Some("/queue prune"),
+        ":queue-stop-all" | "/queue-stop-all" => Some("/queue stop all"),
+        ":queue-retry-failed" | "/queue-retry-failed" => Some("/queue retry failed"),
+        ":queue-retry-completed" | "/queue-retry-completed" => Some("/queue retry completed"),
+        ":queue-retry-all" | "/queue-retry-all" => Some("/queue retry all"),
+        ":queue-auto-on" | "/queue-auto-on" => Some("/queue auto on"),
+        ":queue-auto-off" | "/queue-auto-off" => Some("/queue auto off"),
+        ":live-on" | "/live-on" => Some("/tui live on"),
+        ":live-off" | "/live-off" => Some("/tui live off"),
+        ":feed-up" | "/feed-up" => Some("/tui feed up"),
+        ":feed-down" | "/feed-down" => Some("/tui feed down"),
+        ":feed-top" | "/feed-top" => Some("/tui feed top"),
+        ":feed-new" | "/feed-new" => Some("/tui feed latest"),
+        ":log-up" | "/log-up" => Some("/tui log up"),
+        ":log-down" | "/log-down" => Some("/tui log down"),
+        ":log-top" | "/log-top" => Some("/tui log top"),
+        ":log-new" | "/log-new" => Some("/tui log latest"),
+        ":msg-up" | "/msg-up" => Some("/tui msgs up"),
+        ":msg-down" | "/msg-down" => Some("/tui msgs down"),
+        ":msg-top" | "/msg-top" => Some("/tui msgs top"),
+        ":msg-new" | "/msg-new" => Some("/tui msgs latest"),
+        ":view-reset" | "/view-reset" => Some("/tui view reset"),
+        ":soul-list" | "/soul-list" => Some("/soul list"),
+        ":capabilities" | ":caps" | "/capabilities" => Some("/capabilities"),
+        ":profile" | "/profile" => Some("/profile"),
+        ":scan" | "/scan" => Some("/scan"),
+        ":clear" | "/clear" => Some("/clear"),
+        ":interrupt" | "/interrupt" => Some("/interrupt"),
+        ":repl" | "/repl" => Some("/repl"),
+        _ => None,
+    };
+    if let Some(id) = value
+        .strip_prefix(":queue-stop ")
+        .or_else(|| value.strip_prefix("/queue-stop "))
+        .map(str::trim)
+    {
+        if !id.is_empty() {
+            return Some(format!("/queue stop {}", id));
+        }
+    }
+    if let Some(id) = value
+        .strip_prefix(":queue-retry ")
+        .or_else(|| value.strip_prefix("/queue-retry "))
+        .map(str::trim)
+    {
+        if !id.is_empty() {
+            return Some(format!("/queue retry {}", id));
+        }
+    }
+    if let Some(count) = value
+        .strip_prefix(":queue-prune ")
+        .or_else(|| value.strip_prefix("/queue-prune "))
+        .map(str::trim)
+    {
+        if !count.is_empty() {
+            return Some(format!("/queue prune {}", count));
+        }
+    }
+    direct.map(str::to_string)
+}
+
+fn command_prompt_hint(live_mode: bool, refresh_interval: Duration) -> String {
+    if live_mode {
+        format!(
+            "Command Center Input: live refresh={}ms | :q close | :live-off disable live | Enter keeps latest view",
+            refresh_interval.as_millis()
+        )
+    } else {
+        "Command Center Input: type command and Enter | :q|/q close | :exit exit app | :r|/r refresh"
+            .to_string()
+    }
+}
+
+fn poll_line_with_timeout(timeout: Duration) -> io::Result<Option<String>> {
+    if !stdin_ready(timeout)? {
+        return Ok(None);
+    }
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(Some(input.trim().to_string()))
+}
+
+#[cfg(unix)]
+fn stdin_ready(timeout: Duration) -> io::Result<bool> {
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+
+    unsafe extern "C" {
+        fn poll(fds: *mut PollFd, nfds: usize, timeout: i32) -> i32;
+    }
+
+    const POLLIN: i16 = 0x0001;
+    let timeout_ms_u128 = timeout.as_millis().min(i32::MAX as u128);
+    let timeout_ms = timeout_ms_u128 as i32;
+    let mut fd = PollFd {
+        fd: io::stdin().as_raw_fd(),
+        events: POLLIN,
+        revents: 0,
+    };
+
+    let result = unsafe { poll(&mut fd as *mut PollFd, 1, timeout_ms) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(result > 0 && (fd.revents & POLLIN) != 0)
+}
+
+#[cfg(not(unix))]
+fn stdin_ready(timeout: Duration) -> io::Result<bool> {
+    std::thread::sleep(timeout);
+    Ok(true)
+}
+
 fn render(snapshot: &TuiSnapshot) -> io::Result<()> {
     let (width, height) = terminal_size();
-    let width = width.max(92);
-    let body_lines = height.saturating_sub(14).max(14);
-    let left_w = ((width as f32) * 0.64) as usize;
-    let left_w = left_w.clamp(54, width.saturating_sub(32));
+    let width = width.clamp(60, 220);
+    let body_lines = height.saturating_sub(14).max(10);
+    let preferred_left = ((width as f32) * 0.62) as usize;
+    let min_left = 28;
+    let max_left = width.saturating_sub(20).max(min_left);
+    let left_w = preferred_left.clamp(min_left, max_left);
     let right_w = width.saturating_sub(left_w + 3);
 
     print!("\x1b[2J\x1b[H");
@@ -159,8 +321,9 @@ fn render(snapshot: &TuiSnapshot) -> io::Result<()> {
         row(
             width,
             &format!(
-                "Autonomy {}",
-                truncate(&snapshot.autonomy_mode, width.saturating_sub(14))
+                "Autonomy {}  TUI live {}",
+                truncate(&snapshot.autonomy_mode, width.saturating_sub(26)),
+                if snapshot.live_mode { "on" } else { "off" }
             )
         )
     );
@@ -357,21 +520,25 @@ fn build_left_panel(snapshot: &TuiSnapshot, width: usize, max_lines: usize) -> V
     } else {
         for task in snapshot.supervisor_tasks.iter().take(6) {
             out.push(format!(
-                "  {:<8} {:<6} {:<4} {}",
+                "  {:<8} {:<6} {:<9} {:<12} {}",
                 truncate(&task.id, 8),
                 truncate(&task.state, 6),
-                truncate(&task.class, 4),
-                truncate(&task.prompt, width.saturating_sub(25))
+                truncate(&task.resources, 9),
+                truncate(&task.background_task_id, 12),
+                truncate(&task.prompt, width.saturating_sub(30))
             ));
         }
     }
 
     out.push(String::new());
-    out.push(" Recent Messages".to_string());
+    out.push(format!(
+        " Recent Messages [{}]",
+        snapshot.recent_messages_window
+    ));
     if snapshot.recent_messages.is_empty() {
         out.push("  no messages yet".to_string());
     } else {
-        for msg in snapshot.recent_messages.iter().rev().take(5).rev() {
+        for msg in snapshot.recent_messages.iter().take(8) {
             out.push(format!(
                 "  {}",
                 truncate(&sanitize_line(msg), width.saturating_sub(2))
@@ -388,11 +555,11 @@ fn build_left_panel(snapshot: &TuiSnapshot, width: usize, max_lines: usize) -> V
 
 fn build_right_panel(snapshot: &TuiSnapshot, width: usize, max_lines: usize) -> Vec<String> {
     let mut out = Vec::with_capacity(max_lines);
-    out.push(" Decision Feed".to_string());
+    out.push(format!(" Decision Feed [{}]", snapshot.action_feed_window));
     if snapshot.action_feed.is_empty() {
         out.push("  no tool calls yet".to_string());
     } else {
-        for line in snapshot.action_feed.iter().rev().take(10).rev() {
+        for line in snapshot.action_feed.iter().take(10) {
             out.push(format!(
                 "  {}",
                 truncate(&sanitize_line(line), width.saturating_sub(2))
@@ -405,13 +572,46 @@ fn build_right_panel(snapshot: &TuiSnapshot, width: usize, max_lines: usize) -> 
     out.push("  :q,/q   close command center".to_string());
     out.push("  :exit   quit hypr-claw".to_string());
     out.push("  :r,/r   refresh panels".to_string());
+    out.push("  :status :dash :tasks :caps".to_string());
+    out.push("  :queue :queue-status :queue-run".to_string());
+    out.push("  :queue-clear :queue-prune [N]".to_string());
+    out.push("  :queue-stop-all :queue-retry-failed".to_string());
+    out.push("  :queue-retry-completed :queue-retry-all".to_string());
+    out.push("  :queue-stop <id> :queue-retry <id>".to_string());
+    out.push("  :queue-auto-on/:queue-auto-off".to_string());
+    out.push("  :live-on/:live-off".to_string());
+    out.push("  :feed-up/:feed-down/:feed-top/:feed-new".to_string());
+    out.push("  :log-up/:log-down/:log-top/:log-new".to_string());
+    out.push("  :msg-up/:msg-down/:msg-top/:msg-new".to_string());
+    out.push("  :interrupt :clear :repl".to_string());
+    out.push("  /dashboard runtime dashboard".to_string());
+    out.push("  /models   switch/list models".to_string());
     out.push("  autonomy <mode> switch mode".to_string());
     out.push("  type any command to execute".to_string());
     out.push(String::new());
-    out.push(" Queue".to_string());
-    out.push("  queue              show queue".to_string());
-    out.push("  queue run          run next queued".to_string());
-    out.push("  queue auto on|off  toggle auto".to_string());
+    out.push(" Actionable IDs".to_string());
+    if snapshot.actionable_ids.is_empty() {
+        out.push("  no actionable supervisor ids".to_string());
+    } else {
+        for line in snapshot.actionable_ids.iter().take(6) {
+            out.push(format!(
+                "  {}",
+                truncate(&sanitize_line(line), width.saturating_sub(2))
+            ));
+        }
+    }
+    out.push(String::new());
+    out.push(format!(" Task Log [{}]", snapshot.task_log_window));
+    if snapshot.task_log.is_empty() {
+        out.push("  no task events yet".to_string());
+    } else {
+        for line in snapshot.task_log.iter().take(8) {
+            out.push(format!(
+                "  {}",
+                truncate(&sanitize_line(line), width.saturating_sub(2))
+            ));
+        }
+    }
     out.push(String::new());
     out.push(" Session".to_string());
     out.push(format!("  now: {}", unix_now_compact()));
@@ -516,4 +716,83 @@ fn truncate_visible(input: &str, max_visible: usize) -> String {
 
     out.push_str("...");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tui_shortcuts_map_to_repl_commands() {
+        assert_eq!(map_tui_shortcut(":status").as_deref(), Some("/status"));
+        assert_eq!(map_tui_shortcut(":dash").as_deref(), Some("/dashboard"));
+        assert_eq!(
+            map_tui_shortcut(":queue-run").as_deref(),
+            Some("/queue run")
+        );
+        assert_eq!(
+            map_tui_shortcut(":queue-status").as_deref(),
+            Some("/queue status")
+        );
+        assert_eq!(
+            map_tui_shortcut(":queue-prune").as_deref(),
+            Some("/queue prune")
+        );
+        assert_eq!(
+            map_tui_shortcut(":queue-prune 64").as_deref(),
+            Some("/queue prune 64")
+        );
+        assert_eq!(
+            map_tui_shortcut(":queue-stop-all").as_deref(),
+            Some("/queue stop all")
+        );
+        assert_eq!(
+            map_tui_shortcut(":queue-retry-failed").as_deref(),
+            Some("/queue retry failed")
+        );
+        assert_eq!(
+            map_tui_shortcut(":queue-retry-completed").as_deref(),
+            Some("/queue retry completed")
+        );
+        assert_eq!(
+            map_tui_shortcut(":queue-retry-all").as_deref(),
+            Some("/queue retry all")
+        );
+        assert_eq!(
+            map_tui_shortcut(":queue-auto-off").as_deref(),
+            Some("/queue auto off")
+        );
+        assert_eq!(
+            map_tui_shortcut(":queue-stop sup-3").as_deref(),
+            Some("/queue stop sup-3")
+        );
+        assert_eq!(
+            map_tui_shortcut(":queue-retry sup-3").as_deref(),
+            Some("/queue retry sup-3")
+        );
+        assert_eq!(
+            map_tui_shortcut(":feed-up").as_deref(),
+            Some("/tui feed up")
+        );
+        assert_eq!(
+            map_tui_shortcut(":msg-new").as_deref(),
+            Some("/tui msgs latest")
+        );
+        assert_eq!(map_tui_shortcut(":log-up").as_deref(), Some("/tui log up"));
+        assert_eq!(
+            map_tui_shortcut(":log-new").as_deref(),
+            Some("/tui log latest")
+        );
+        assert_eq!(
+            map_tui_shortcut(":live-on").as_deref(),
+            Some("/tui live on")
+        );
+        assert_eq!(
+            map_tui_shortcut(":live-off").as_deref(),
+            Some("/tui live off")
+        );
+        assert_eq!(map_tui_shortcut(":caps").as_deref(), Some("/capabilities"));
+        assert_eq!(map_tui_shortcut(":repl").as_deref(), Some("/repl"));
+        assert_eq!(map_tui_shortcut("open firefox"), None);
+    }
 }

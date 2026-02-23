@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -21,7 +21,31 @@ enum UiInputEvent {
     Skip,
 }
 
+#[derive(Debug, Clone)]
+struct TuiViewState {
+    feed_offset: usize,
+    messages_offset: usize,
+    log_offset: usize,
+    feed_page: usize,
+    messages_page: usize,
+    log_page: usize,
+}
+
+impl Default for TuiViewState {
+    fn default() -> Self {
+        Self {
+            feed_offset: 0,
+            messages_offset: 0,
+            log_offset: 0,
+            feed_page: 10,
+            messages_page: 5,
+            log_page: 8,
+        }
+    }
+}
+
 const MAX_RECOVERY_ATTEMPTS: u32 = 2;
+const TUI_LIVE_REFRESH_MS: u64 = 700;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -132,10 +156,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let available_souls = discover_souls("./souls");
     let mut agent_state = load_agent_os_state(&context);
     ensure_default_thread(&mut agent_state);
+    let recovered_stale = reconcile_supervisor_after_restart(&mut agent_state);
+    if recovered_stale > 0 {
+        println!(
+            "ℹ️  Recovered {} stale supervisor task(s) from previous session.",
+            recovered_stale
+        );
+    }
     run_first_run_onboarding(&user_id, &mut context, &mut agent_state).await?;
     if profile_needs_capability_refresh(&agent_state.onboarding.system_profile) {
         agent_state.onboarding.system_profile = collect_system_profile(&user_id).await;
         agent_state.onboarding.last_scan_at = Some(chrono::Utc::now().timestamp());
+    }
+    let (mut capability_registry, registry_loaded) = match load_capability_registry(&user_id) {
+        Ok(registry) => (registry, true),
+        Err(_) => (
+            build_capability_registry(&agent_state.onboarding.system_profile),
+            false,
+        ),
+    };
+    if !registry_loaded
+        || capability_registry_needs_refresh(
+            &capability_registry,
+            &agent_state.onboarding.system_profile,
+        )
+    {
+        capability_registry = build_capability_registry(&agent_state.onboarding.system_profile);
+        if let Err(e) = save_capability_registry(&user_id, &capability_registry) {
+            eprintln!("⚠️  Failed to save capability registry: {}", e);
+        }
     }
     if let Err(e) = set_full_auto_mode(agent_state.onboarding.trusted_full_auto) {
         eprintln!("⚠️  Failed to persist full-auto mode flag: {}", e);
@@ -243,6 +292,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut active_allowed_tools = allowed_tools.clone();
     let allowed_tools_state = Arc::new(RwLock::new(allowed_tools.clone()));
     let action_feed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let task_event_feed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Create runtime adapters
     let runtime_dispatcher = Arc::new(RuntimeDispatcherAdapter::new(
@@ -250,7 +300,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         action_feed.clone(),
     ));
     let runtime_registry = Arc::new(RuntimeRegistryAdapter::new(
-        registry_arc,
+        registry_arc.clone(),
         allowed_tools_state.clone(),
     ));
 
@@ -305,9 +355,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create agent loop
     let agent_loop = hypr_claw_runtime::AgentLoop::new(
-        async_session,
-        async_locks,
-        runtime_dispatcher,
+        async_session.clone(),
+        async_locks.clone(),
+        runtime_dispatcher.clone(),
         runtime_registry.clone(),
         llm_client,
         compactor,
@@ -348,22 +398,300 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     let mut tui_mode = false;
+    let mut tui_live_mode = false;
+    let mut tui_view = TuiViewState::default();
     let mut auto_queued_task: Option<SupervisedTask> = None;
-
-    loop {
-        if auto_queued_task.is_none() && agent_state.supervisor.auto_run {
-            auto_queued_task = start_next_queued_supervised_task(&mut agent_state);
-            if let Some(task) = &auto_queued_task {
-                persist_agent_os_state(&mut context, &agent_state);
-                context_manager.save(&context).await?;
-                println!(
-                    "▶ Auto-running queued task {} ({})",
-                    task.id,
-                    task.class.as_str()
-                );
+    let mut queue_block_notice: Option<String> = None;
+    let mut background_task_index: HashMap<String, TaskStateDigest> = HashMap::new();
+    let mut supervisor_background_map: HashMap<String, String> = HashMap::new();
+    for task in &agent_state.supervisor.tasks {
+        if task.status == SupervisedTaskStatus::Running {
+            if let Some(bg_id) = &task.background_task_id {
+                supervisor_background_map.insert(task.id.clone(), bg_id.clone());
             }
         }
+    }
+    if recovered_stale > 0 {
+        push_task_event(
+            &task_event_feed,
+            format!(
+                "sup recovered {} stale running task(s) after restart",
+                recovered_stale
+            ),
+        );
+    }
 
+    loop {
+        let latest_task_list = task_manager.list_tasks().await;
+        sync_background_task_events(
+            &latest_task_list,
+            &mut background_task_index,
+            &task_event_feed,
+        );
+
+        let mut supervisor_state_changed = false;
+        let mut finished_background_sup = Vec::<String>::new();
+        for (sup_id, bg_id) in &supervisor_background_map {
+            if let Some(bg_task) = latest_task_list.iter().find(|task| &task.id == bg_id) {
+                match bg_task.status {
+                    hypr_claw_tasks::TaskStatus::Completed => {
+                        mark_supervised_task_completed(&mut agent_state, sup_id);
+                        let summary = bg_task.result.clone().unwrap_or_else(|| "done".to_string());
+                        push_task_event(
+                            &task_event_feed,
+                            format!(
+                                "sup {} completed via background {} out={}",
+                                sup_id,
+                                bg_id,
+                                truncate_for_table(&summary, 56)
+                            ),
+                        );
+                        finished_background_sup.push(sup_id.clone());
+                        supervisor_state_changed = true;
+                    }
+                    hypr_claw_tasks::TaskStatus::Failed => {
+                        let err = bg_task.error.clone().unwrap_or_else(|| {
+                            format!("background task {} {:?}", bg_id, bg_task.status)
+                        });
+                        mark_supervised_task_failed(&mut agent_state, sup_id, err.clone());
+                        push_task_event(
+                            &task_event_feed,
+                            format!(
+                                "sup {} failed via background {} {}",
+                                sup_id,
+                                bg_id,
+                                truncate_for_table(&err, 56)
+                            ),
+                        );
+                        finished_background_sup.push(sup_id.clone());
+                        supervisor_state_changed = true;
+                    }
+                    hypr_claw_tasks::TaskStatus::Cancelled => {
+                        let reason = bg_task
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "Cancelled by user".to_string());
+                        mark_supervised_task_cancelled(
+                            &mut agent_state,
+                            sup_id,
+                            Some(reason.clone()),
+                        );
+                        push_task_event(
+                            &task_event_feed,
+                            format!(
+                                "sup {} cancelled via background {} {}",
+                                sup_id,
+                                bg_id,
+                                truncate_for_table(&reason, 56)
+                            ),
+                        );
+                        finished_background_sup.push(sup_id.clone());
+                        supervisor_state_changed = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for sup_id in finished_background_sup {
+            supervisor_background_map.remove(&sup_id);
+        }
+        if supervisor_state_changed {
+            persist_agent_os_state(&mut context, &agent_state);
+            context_manager.save(&context).await?;
+        }
+
+        if auto_queued_task.is_none() && agent_state.supervisor.auto_run {
+            loop {
+                match start_next_queued_supervised_task(&mut agent_state) {
+                    QueueStartResult::Started(task) => {
+                        if can_run_supervisor_in_background(&task) {
+                            let bg_task_id = format!("supbg-{}", task.id);
+                            let bg_description = format!(
+                                "supervisor {} {}",
+                                task.id,
+                                truncate_for_table(&task.prompt, 56)
+                            );
+                            let task_prompt = task.prompt.clone();
+                            let task_id = task.id.clone();
+                            let task_class = task.class.clone();
+                            let timeout_bg =
+                                watchdog_timeout_for_class(&task_class, &agent_state.autonomy_mode);
+                            let max_iter_bg = active_soul
+                                .max_iterations
+                                .min(
+                                    execution_budget_for_class(
+                                        &task_class,
+                                        &agent_state.autonomy_mode,
+                                    )
+                                    .max_iterations,
+                                )
+                                .max(1);
+                            let provider_bg = config.provider.clone();
+                            let model_bg = config.model.clone();
+                            let async_session_bg = async_session.clone();
+                            let async_locks_bg = async_locks.clone();
+                            let runtime_dispatcher_bg = runtime_dispatcher.clone();
+                            let registry_arc_bg = registry_arc.clone();
+                            let allowed_tools_bg = active_allowed_tools.clone();
+                            let task_session_key = format!("{}::sup::{}", session_key, task_id);
+                            let agent_name_bg = agent_name.clone();
+                            let system_prompt_bg = augment_system_prompt_for_turn(
+                                &system_prompt,
+                                &agent_state.onboarding.system_profile,
+                                &capability_registry,
+                                &active_allowed_tools,
+                                &agent_state.autonomy_mode,
+                            );
+
+                            let spawn_result = task_manager
+                                .spawn_task(
+                                    bg_task_id.clone(),
+                                    bg_description,
+                                    move || async move {
+                                        let llm_client =
+                                            build_llm_client_for_provider(&provider_bg, &model_bg)
+                                                .map_err(|e| {
+                                                    format!("LLM client init failed: {}", e)
+                                                })?;
+                                        let allowed_state_bg =
+                                            Arc::new(RwLock::new(allowed_tools_bg));
+                                        let runtime_registry_bg =
+                                            Arc::new(RuntimeRegistryAdapter::new(
+                                                registry_arc_bg,
+                                                allowed_state_bg,
+                                            ));
+                                        let compactor = hypr_claw_runtime::Compactor::new(
+                                            4000,
+                                            SimpleSummarizer,
+                                        );
+                                        let agent_loop_bg = hypr_claw_runtime::AgentLoop::new(
+                                            async_session_bg,
+                                            async_locks_bg,
+                                            runtime_dispatcher_bg,
+                                            runtime_registry_bg,
+                                            llm_client,
+                                            compactor,
+                                            max_iter_bg,
+                                        );
+                                        match tokio::time::timeout(
+                                            timeout_bg,
+                                            agent_loop_bg.run(
+                                                &task_session_key,
+                                                &agent_name_bg,
+                                                &system_prompt_bg,
+                                                &task_prompt,
+                                            ),
+                                        )
+                                        .await
+                                        {
+                                            Ok(Ok(response)) => Ok(response),
+                                            Ok(Err(e)) => Err(e.to_string()),
+                                            Err(_) => Err(format!(
+                                                "Execution watchdog timeout after {}s",
+                                                timeout_bg.as_secs()
+                                            )),
+                                        }
+                                    },
+                                )
+                                .await;
+
+                            match spawn_result {
+                                Ok(background_id) => {
+                                    queue_block_notice = None;
+                                    set_supervised_task_background_id(
+                                        &mut agent_state,
+                                        &task_id,
+                                        Some(background_id.clone()),
+                                    );
+                                    supervisor_background_map
+                                        .insert(task_id.clone(), background_id);
+                                    push_task_event(
+                                        &task_event_feed,
+                                        format!(
+                                            "sup {} started in background class={} res={}",
+                                            task_id,
+                                            task.class.as_str(),
+                                            truncate_for_table(&task.resources.join(","), 24)
+                                        ),
+                                    );
+                                    persist_agent_os_state(&mut context, &agent_state);
+                                    context_manager.save(&context).await?;
+                                    println!(
+                                        "▶ Auto-running queued task {} in background ({})",
+                                        task_id,
+                                        task.class.as_str()
+                                    );
+                                    continue;
+                                }
+                                Err(e) => {
+                                    let err = e.to_string();
+                                    set_supervised_task_background_id(
+                                        &mut agent_state,
+                                        &task_id,
+                                        None,
+                                    );
+                                    mark_supervised_task_failed(
+                                        &mut agent_state,
+                                        &task_id,
+                                        err.clone(),
+                                    );
+                                    push_task_event(
+                                        &task_event_feed,
+                                        format!(
+                                            "sup {} background start failed {}",
+                                            task_id,
+                                            truncate_for_table(&err, 56)
+                                        ),
+                                    );
+                                    persist_agent_os_state(&mut context, &agent_state);
+                                    context_manager.save(&context).await?;
+                                    continue;
+                                }
+                            }
+                        }
+
+                        queue_block_notice = None;
+                        auto_queued_task = Some(task.clone());
+                        push_task_event(
+                            &task_event_feed,
+                            format!(
+                                "sup {} started (auto-run) class={} res={}",
+                                task.id,
+                                task.class.as_str(),
+                                truncate_for_table(&task.resources.join(","), 24)
+                            ),
+                        );
+                        persist_agent_os_state(&mut context, &agent_state);
+                        context_manager.save(&context).await?;
+                        println!(
+                            "▶ Auto-running queued task {} ({})",
+                            task.id,
+                            task.class.as_str()
+                        );
+                        break;
+                    }
+                    QueueStartResult::Blocked(reason) => {
+                        if queue_block_notice.as_deref() != Some(reason.as_str()) {
+                            println!("⏸ Queue auto-run blocked: {}", reason);
+                            push_task_event(
+                                &task_event_feed,
+                                format!("sup queue blocked: {}", reason),
+                            );
+                            queue_block_notice = Some(reason);
+                        }
+                        break;
+                    }
+                    QueueStartResult::Empty => {
+                        queue_block_notice = None;
+                        break;
+                    }
+                }
+            }
+        } else if !agent_state.supervisor.auto_run {
+            queue_block_notice = None;
+        }
+
+        let task_list_snapshot = latest_task_list.clone();
         tokio::select! {
             _ = interrupt.notified() => {
                 println!("\n^C received. No active request to interrupt. Use 'exit' to quit.");
@@ -374,7 +702,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return UiInputEvent::RunQueued(task);
                 }
                 if tui_mode {
-                    let task_list = task_manager.list_tasks().await;
                     let snapshot = build_tui_snapshot(
                         provider_name,
                         &config.model,
@@ -383,11 +710,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &active_soul_id,
                         &agent_state,
                         &context,
-                        &task_list,
+                        &task_list_snapshot,
                         available_souls.len(),
                         &action_feed,
+                        &task_event_feed,
+                        tui_live_mode,
+                        &tui_view,
                     );
-                    match tui::run_command_center(&snapshot) {
+                    match tui::run_command_center(
+                        &snapshot,
+                        Duration::from_millis(TUI_LIVE_REFRESH_MS),
+                    ) {
                         Ok(tui::TuiOutcome::Submit(cmd)) => UiInputEvent::Line(cmd),
                         Ok(tui::TuiOutcome::Close) => UiInputEvent::CloseTui,
                         Ok(tui::TuiOutcome::ExitApp) => UiInputEvent::ExitApp,
@@ -398,10 +731,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 } else {
-                    let running_tasks = task_manager
-                        .list_tasks()
-                        .await
-                        .into_iter()
+                    let running_tasks = task_list_snapshot
+                        .iter()
                         .filter(|t| t.status == hypr_claw_tasks::TaskStatus::Running)
                         .count();
                     let prompt = format!(
@@ -452,6 +783,109 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("ℹ️  Use '/tui' first. Inside TUI, ':q' closes and ':r' refreshes.\n");
                     continue;
                 }
+                if !tui_mode && input.starts_with(':') {
+                    println!("ℹ️  ':' commands are TUI-local. Use '/tui' first.\n");
+                    continue;
+                }
+
+                if !input_from_queue {
+                    if let Some(cmd) = input
+                        .strip_prefix("/tui ")
+                        .or_else(|| input.strip_prefix("tui "))
+                        .map(str::trim)
+                    {
+                        let feed_total = action_feed_total(&action_feed);
+                        let msg_total = context.recent_history.len();
+                        match cmd {
+                            "live on" => {
+                                tui_live_mode = true;
+                                println!("✅ TUI live refresh enabled ({}ms)", TUI_LIVE_REFRESH_MS);
+                            }
+                            "live off" => {
+                                tui_live_mode = false;
+                                println!("✅ TUI live refresh disabled");
+                            }
+                            "live" => {
+                                println!(
+                                    "TUI live refresh: {} ({}ms)",
+                                    if tui_live_mode { "on" } else { "off" },
+                                    TUI_LIVE_REFRESH_MS
+                                );
+                            }
+                            "feed up" => {
+                                let max_offset = max_view_offset(feed_total, tui_view.feed_page);
+                                tui_view.feed_offset =
+                                    (tui_view.feed_offset + tui_view.feed_page).min(max_offset);
+                            }
+                            "feed down" => {
+                                tui_view.feed_offset =
+                                    tui_view.feed_offset.saturating_sub(tui_view.feed_page);
+                            }
+                            "feed top" => {
+                                tui_view.feed_offset = max_view_offset(feed_total, tui_view.feed_page);
+                            }
+                            "feed latest" => {
+                                tui_view.feed_offset = 0;
+                            }
+                            "msgs up" => {
+                                let max_offset =
+                                    max_view_offset(msg_total, tui_view.messages_page);
+                                tui_view.messages_offset =
+                                    (tui_view.messages_offset + tui_view.messages_page).min(max_offset);
+                            }
+                            "msgs down" => {
+                                tui_view.messages_offset = tui_view
+                                    .messages_offset
+                                    .saturating_sub(tui_view.messages_page);
+                            }
+                            "msgs top" => {
+                                tui_view.messages_offset =
+                                    max_view_offset(msg_total, tui_view.messages_page);
+                            }
+                            "msgs latest" => {
+                                tui_view.messages_offset = 0;
+                            }
+                            "log up" => {
+                                let task_log_total = build_task_log_lines(
+                                    &task_manager.list_tasks().await,
+                                    &agent_state,
+                                    &task_event_feed,
+                                )
+                                .len();
+                                let max_offset =
+                                    max_view_offset(task_log_total, tui_view.log_page);
+                                tui_view.log_offset =
+                                    (tui_view.log_offset + tui_view.log_page).min(max_offset);
+                            }
+                            "log down" => {
+                                tui_view.log_offset =
+                                    tui_view.log_offset.saturating_sub(tui_view.log_page);
+                            }
+                            "log top" => {
+                                let task_log_total = build_task_log_lines(
+                                    &task_manager.list_tasks().await,
+                                    &agent_state,
+                                    &task_event_feed,
+                                )
+                                .len();
+                                tui_view.log_offset =
+                                    max_view_offset(task_log_total, tui_view.log_page);
+                            }
+                            "log latest" => {
+                                tui_view.log_offset = 0;
+                            }
+                            "view reset" => {
+                                tui_view = TuiViewState::default();
+                            }
+                            _ => {
+                                println!(
+                                    "Use: /tui live on|off|live | /tui feed up|down|top|latest | /tui msgs up|down|top|latest | /tui log up|down|top|latest | /tui view reset"
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                }
 
                 if !input_from_queue {
                     match input.as_str() {
@@ -464,6 +898,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                     "tui" | "/tui" => {
+                        tui_view = TuiViewState::default();
                         tui_mode = true;
                         continue;
                     }
@@ -514,7 +949,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         context_manager.save(&context).await?;
                         continue;
                     }
-                    "profile" => {
+                    "profile" | "/profile" => {
                         let profile = &agent_state.onboarding.system_profile;
                         if profile.is_null() || profile == &json!({}) {
                             println!("\nNo profile stored yet.\n");
@@ -526,7 +961,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         continue;
                     }
-                    "scan" => {
+                    "capabilities" | "/capabilities" => {
+                        print_capability_registry_summary(&user_id, &capability_registry);
+                        continue;
+                    }
+                    "scan" | "/scan" => {
                         if prompt_yes_no("Run a new system scan now? [Y/n] ", true)? {
                             let deep_scan = prompt_yes_no(
                                 "Deep scan (home/.config/packages/hyprland)? [Y/n] ",
@@ -536,17 +975,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "🔎 Running {} scan...",
                                 if deep_scan { "deep" } else { "standard" }
                             );
-                            agent_state.onboarding.system_profile = if deep_scan {
+                            let mut scanned_profile = if deep_scan {
                                 collect_deep_system_profile(&user_id).await
                             } else {
                                 collect_system_profile(&user_id).await
                             };
+
+                            print_system_profile_summary(&scanned_profile);
+                            let mut scanned_registry = build_capability_registry(&scanned_profile);
+                            print_capability_registry_diff_summary(
+                                &capability_registry,
+                                &scanned_registry,
+                            );
+
+                            if prompt_yes_no("Edit scanned profile before save? [y/N] ", false)? {
+                                edit_profile_interactively(&mut scanned_profile)?;
+                                print_system_profile_summary(&scanned_profile);
+                                scanned_registry = build_capability_registry(&scanned_profile);
+                                print_capability_registry_diff_summary(
+                                    &capability_registry,
+                                    &scanned_registry,
+                                );
+                            }
+
+                            if !prompt_yes_no(
+                                "Apply scanned profile + capability changes? [Y/n] ",
+                                true,
+                            )? {
+                                println!("⏭ Scan changes discarded.");
+                                continue;
+                            }
+
+                            agent_state.onboarding.system_profile = scanned_profile;
                             agent_state.onboarding.deep_scan_completed = deep_scan;
                             agent_state.onboarding.profile_confirmed = true;
-                            agent_state.onboarding.last_scan_at = Some(chrono::Utc::now().timestamp());
+                            agent_state.onboarding.last_scan_at =
+                                Some(chrono::Utc::now().timestamp());
+                            capability_registry = scanned_registry;
+                            if let Err(e) = save_capability_registry(&user_id, &capability_registry) {
+                                eprintln!("⚠️  Failed to save capability registry: {}", e);
+                            }
                             persist_agent_os_state(&mut context, &agent_state);
                             context_manager.save(&context).await?;
-                            println!("✅ System profile updated");
+                            println!("✅ System profile and capability registry updated");
                         }
                         continue;
                     }
@@ -555,7 +1026,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                     "interrupt" | "/interrupt" => {
-                        println!("ℹ️  Press Ctrl+C while a request is running to interrupt it.");
+                        interrupt.notify_waiters();
+                        println!("⏹ Interrupt signal sent.");
                         continue;
                     }
                     "trust" | "/trust" => {
@@ -572,11 +1044,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "autonomy" | "/autonomy" => {
                         println!("Autonomy mode: {}", agent_state.autonomy_mode.as_str());
-                        println!("Use: autonomy prompt_first | autonomy guarded");
+                        println!("Use: autonomy prompt_first | autonomy guarded | autonomy stats | autonomy reset");
                         continue;
                     }
                     "queue" | "/queue" => {
                         print_supervisor_queue(&agent_state);
+                        continue;
+                    }
+                    "queue status" | "/queue status" => {
+                        print_supervisor_queue_status(&agent_state);
                         continue;
                     }
                     _ => {}
@@ -626,7 +1102,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             context_manager.save(&context).await?;
                             println!("✅ Autonomy mode set to guarded (deterministic recovery)");
                         }
-                        _ => println!("Use: autonomy prompt_first | autonomy guarded"),
+                        "stats" => {
+                            print_autonomy_stats(&agent_state);
+                        }
+                        "reset" => {
+                            agent_state.autonomy_calibration = AutonomyCalibrationState::default();
+                            persist_agent_os_state(&mut context, &agent_state);
+                            context_manager.save(&context).await?;
+                            println!("✅ Autonomy calibration stats reset");
+                        }
+                        _ => println!(
+                            "Use: autonomy prompt_first | autonomy guarded | autonomy stats | autonomy reset"
+                        ),
                     }
                     continue;
                 }
@@ -649,6 +1136,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     persist_agent_os_state(&mut context, &agent_state);
                     context_manager.save(&context).await?;
+                    push_task_event(
+                        &task_event_feed,
+                        format!(
+                            "sup {} queued class={} {}",
+                            task_id,
+                            class.as_str(),
+                            truncate_for_table(prompt, 44)
+                        ),
+                    );
                     println!(
                         "🗂 Queued {} ({}) as {}",
                         task_id,
@@ -663,18 +1159,633 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let cleared = cancel_queued_supervised_tasks(&mut agent_state);
                     persist_agent_os_state(&mut context, &agent_state);
                     context_manager.save(&context).await?;
+                    push_task_event(&task_event_feed, format!("sup queue cleared {} queued tasks", cleared));
                     println!("🧹 Cleared {} queued supervisor tasks", cleared);
                     continue;
                 }
 
-                if !input_from_queue && (input == "queue run" || input == "/queue run") {
-                    queued_execution = start_next_queued_supervised_task(&mut agent_state);
-                    if queued_execution.is_none() {
-                        println!("ℹ️  No queued tasks.");
+                if !input_from_queue {
+                    if let Some(raw) = input
+                        .strip_prefix("queue prune")
+                        .or_else(|| input.strip_prefix("/queue prune"))
+                        .map(str::trim)
+                    {
+                        let keep_terminal = if raw.is_empty() {
+                            200usize
+                        } else if let Ok(value) = raw.parse::<usize>() {
+                            value.max(1)
+                        } else {
+                            println!("Usage: queue prune [keep_terminal_count]");
+                            continue;
+                        };
+                        let removed = prune_supervisor_tasks(&mut agent_state, keep_terminal);
+                        supervisor_background_map.retain(|sup_id, _| {
+                            agent_state.supervisor.tasks.iter().any(|task| {
+                                task.id == *sup_id && task.status == SupervisedTaskStatus::Running
+                            })
+                        });
+                        push_task_event(
+                            &task_event_feed,
+                            format!(
+                                "sup pruned removed={} keep_terminal={}",
+                                removed, keep_terminal
+                            ),
+                        );
+                        persist_agent_os_state(&mut context, &agent_state);
+                        context_manager.save(&context).await?;
+                        println!(
+                            "🧹 Pruned {} terminal supervisor tasks (kept latest {}).",
+                            removed, keep_terminal
+                        );
                         continue;
                     }
-                    persist_agent_os_state(&mut context, &agent_state);
-                    context_manager.save(&context).await?;
+                }
+
+                if !input_from_queue {
+                    if let Some(target) = input
+                        .strip_prefix("queue inspect ")
+                        .or_else(|| input.strip_prefix("/queue inspect "))
+                        .map(str::trim)
+                    {
+                        if target.is_empty() {
+                            println!("Usage: queue inspect <sup_id|bg_id>");
+                            continue;
+                        }
+                        if let Some(task) = resolve_supervisor_task(target, &agent_state) {
+                            print_supervisor_task_inspect(task);
+                        } else {
+                            println!("❌ Supervisor task not found for '{}'", target);
+                        }
+                        continue;
+                    }
+                }
+
+                if !input_from_queue {
+                    if let Some(raw) = input
+                        .strip_prefix("queue events ")
+                        .or_else(|| input.strip_prefix("/queue events "))
+                        .map(str::trim)
+                    {
+                        if raw.is_empty() {
+                            println!("Usage: queue events <sup_id|bg_id> [limit]");
+                            continue;
+                        }
+                        let mut parts = raw.split_whitespace();
+                        let target = parts.next().unwrap_or_default();
+                        if target.is_empty() {
+                            println!("Usage: queue events <sup_id|bg_id> [limit]");
+                            continue;
+                        }
+                        let limit = if let Some(raw_limit) = parts.next() {
+                            if let Ok(value) = raw_limit.parse::<usize>() {
+                                value.max(1)
+                            } else {
+                                println!("Usage: queue events <sup_id|bg_id> [limit]");
+                                continue;
+                            }
+                        } else {
+                            24usize
+                        };
+                        if parts.next().is_some() {
+                            println!("Usage: queue events <sup_id|bg_id> [limit]");
+                            continue;
+                        }
+
+                        if let Some(task) = resolve_supervisor_task(target, &agent_state) {
+                            let event_rows =
+                                collect_supervisor_task_events(task, &task_event_feed, limit);
+                            print_supervisor_task_events(task, &event_rows, limit);
+                        } else {
+                            println!("❌ Supervisor task not found for '{}'", target);
+                        }
+                        continue;
+                    }
+                }
+
+                if !input_from_queue {
+                    if let Some(target) = input
+                        .strip_prefix("queue stop ")
+                        .or_else(|| input.strip_prefix("/queue stop "))
+                        .map(str::trim)
+                    {
+                        if target.is_empty() {
+                            println!("Usage: queue stop <sup_id|bg_id|all>");
+                            continue;
+                        }
+                        if target == "all" {
+                            let candidate_ids = agent_state
+                                .supervisor
+                                .tasks
+                                .iter()
+                                .filter(|task| {
+                                    task.status == SupervisedTaskStatus::Queued
+                                        || task.status == SupervisedTaskStatus::Running
+                                })
+                                .map(|task| task.id.clone())
+                                .collect::<Vec<_>>();
+                            if candidate_ids.is_empty() {
+                                println!("ℹ️  No queued/running supervisor tasks to stop.");
+                                continue;
+                            }
+
+                            let mut cancelled = 0usize;
+                            let mut errors = 0usize;
+                            let mut interrupted_foreground = 0usize;
+                            for sup_id in candidate_ids {
+                                let snapshot = agent_state
+                                    .supervisor
+                                    .tasks
+                                    .iter()
+                                    .find(|task| task.id == sup_id)
+                                    .cloned();
+                                let Some(task) = snapshot else {
+                                    continue;
+                                };
+                                match task.status {
+                                    SupervisedTaskStatus::Queued => {
+                                        mark_supervised_task_cancelled(
+                                            &mut agent_state,
+                                            &sup_id,
+                                            Some("Cancelled by user (bulk)".to_string()),
+                                        );
+                                        supervisor_background_map.remove(&sup_id);
+                                        cancelled += 1;
+                                    }
+                                    SupervisedTaskStatus::Running => {
+                                        let bg_id = task
+                                            .background_task_id
+                                            .clone()
+                                            .or_else(|| supervisor_background_map.get(&sup_id).cloned());
+                                        if let Some(bg_id) = bg_id {
+                                            match task_manager.cancel_task(&bg_id).await {
+                                                Ok(_) => {
+                                                    supervisor_background_map.remove(&sup_id);
+                                                    mark_supervised_task_cancelled(
+                                                        &mut agent_state,
+                                                        &sup_id,
+                                                        Some("Cancelled by user (bulk)".to_string()),
+                                                    );
+                                                    cancelled += 1;
+                                                }
+                                                Err(_) => {
+                                                    errors += 1;
+                                                }
+                                            }
+                                        } else {
+                                            interrupt.notify_waiters();
+                                            mark_supervised_task_cancelled(
+                                                &mut agent_state,
+                                                &sup_id,
+                                                Some("Cancelled by user (bulk)".to_string()),
+                                            );
+                                            interrupted_foreground += 1;
+                                            cancelled += 1;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            push_task_event(
+                                &task_event_feed,
+                                format!(
+                                    "sup bulk stop all cancelled={} interrupted_fg={} errors={}",
+                                    cancelled, interrupted_foreground, errors
+                                ),
+                            );
+                            persist_agent_os_state(&mut context, &agent_state);
+                            context_manager.save(&context).await?;
+                            println!(
+                                "🧹 Stopped all: cancelled={} interrupted_fg={} errors={}",
+                                cancelled, interrupted_foreground, errors
+                            );
+                            continue;
+                        }
+                        let sup_id = if agent_state
+                            .supervisor
+                            .tasks
+                            .iter()
+                            .any(|task| task.id == target)
+                        {
+                            target.to_string()
+                        } else if let Some((sup, _)) = supervisor_background_map
+                            .iter()
+                            .find(|(_, bg_id)| bg_id.as_str() == target)
+                        {
+                            sup.clone()
+                        } else {
+                            println!("❌ Supervisor task not found for '{}'", target);
+                            continue;
+                        };
+
+                        let snapshot = agent_state
+                            .supervisor
+                            .tasks
+                            .iter()
+                            .find(|task| task.id == sup_id)
+                            .cloned();
+                        let Some(task) = snapshot else {
+                            println!("❌ Supervisor task '{}' not found", sup_id);
+                            continue;
+                        };
+
+                        match task.status {
+                            SupervisedTaskStatus::Queued => {
+                                mark_supervised_task_cancelled(
+                                    &mut agent_state,
+                                    &sup_id,
+                                    Some("Cancelled by user".to_string()),
+                                );
+                                push_task_event(
+                                    &task_event_feed,
+                                    format!("sup {} cancelled from queue", sup_id),
+                                );
+                                println!("🧹 Cancelled queued supervisor task {}", sup_id);
+                            }
+                            SupervisedTaskStatus::Running => {
+                                let bg_id = task
+                                    .background_task_id
+                                    .clone()
+                                    .or_else(|| supervisor_background_map.get(&sup_id).cloned());
+                                if let Some(bg_id) = bg_id {
+                                    match task_manager.cancel_task(&bg_id).await {
+                                        Ok(_) => {
+                                            supervisor_background_map.remove(&sup_id);
+                                            mark_supervised_task_cancelled(
+                                                &mut agent_state,
+                                                &sup_id,
+                                                Some("Cancelled by user".to_string()),
+                                            );
+                                            push_task_event(
+                                                &task_event_feed,
+                                                format!(
+                                                    "sup {} cancelled background {}",
+                                                    sup_id, bg_id
+                                                ),
+                                            );
+                                            println!(
+                                                "🧹 Cancelled running supervisor task {} (bg {})",
+                                                sup_id, bg_id
+                                            );
+                                        }
+                                        Err(e) => {
+                                            let err = e.to_string();
+                                            push_task_event(
+                                                &task_event_feed,
+                                                format!(
+                                                    "sup {} cancel failed {}",
+                                                    sup_id,
+                                                    truncate_for_table(&err, 56)
+                                                ),
+                                            );
+                                            println!(
+                                                "❌ Failed to cancel background task for {}: {}",
+                                                sup_id, err
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    interrupt.notify_waiters();
+                                    mark_supervised_task_cancelled(
+                                        &mut agent_state,
+                                        &sup_id,
+                                        Some("Cancelled by user".to_string()),
+                                    );
+                                    push_task_event(
+                                        &task_event_feed,
+                                        format!("sup {} cancelled foreground run", sup_id),
+                                    );
+                                    println!(
+                                        "⏹ Sent interrupt signal for running foreground task {}",
+                                        sup_id
+                                    );
+                                }
+                            }
+                            SupervisedTaskStatus::Completed => {
+                                println!("ℹ️  Task {} already completed.", sup_id);
+                            }
+                            SupervisedTaskStatus::Failed => {
+                                println!("ℹ️  Task {} already failed.", sup_id);
+                            }
+                            SupervisedTaskStatus::Cancelled => {
+                                println!("ℹ️  Task {} already cancelled.", sup_id);
+                            }
+                        }
+
+                        persist_agent_os_state(&mut context, &agent_state);
+                        context_manager.save(&context).await?;
+                        continue;
+                    }
+                }
+
+                if !input_from_queue {
+                    if let Some(target) = input
+                        .strip_prefix("queue retry ")
+                        .or_else(|| input.strip_prefix("/queue retry "))
+                        .map(str::trim)
+                    {
+                        if target.is_empty() {
+                            println!("Usage: queue retry <sup_id|failed|cancelled|completed|all>");
+                            continue;
+                        }
+                        if target == "failed" || target == "cancelled" {
+                            let candidates = agent_state
+                                .supervisor
+                                .tasks
+                                .iter()
+                                .filter(|task| {
+                                    task.status == SupervisedTaskStatus::Failed
+                                        || task.status == SupervisedTaskStatus::Cancelled
+                                })
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            if candidates.is_empty() {
+                                println!("ℹ️  No failed/cancelled supervisor tasks to retry.");
+                                continue;
+                            }
+                            let mut retried = 0usize;
+                            for task in candidates {
+                                let retry_id = enqueue_supervised_task(
+                                    &mut agent_state,
+                                    task.prompt.clone(),
+                                    task.class.clone(),
+                                );
+                                push_task_event(
+                                    &task_event_feed,
+                                    format!("sup {} retried as {}", task.id, retry_id),
+                                );
+                                retried += 1;
+                            }
+                            persist_agent_os_state(&mut context, &agent_state);
+                            context_manager.save(&context).await?;
+                            println!("🔁 Queued {} retries from failed/cancelled tasks", retried);
+                            continue;
+                        }
+                        if target == "completed" {
+                            let candidates = agent_state
+                                .supervisor
+                                .tasks
+                                .iter()
+                                .filter(|task| task.status == SupervisedTaskStatus::Completed)
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            if candidates.is_empty() {
+                                println!("ℹ️  No completed supervisor tasks to retry.");
+                                continue;
+                            }
+                            let mut retried = 0usize;
+                            for task in candidates {
+                                let retry_id = enqueue_supervised_task(
+                                    &mut agent_state,
+                                    task.prompt.clone(),
+                                    task.class.clone(),
+                                );
+                                push_task_event(
+                                    &task_event_feed,
+                                    format!("sup {} retried as {}", task.id, retry_id),
+                                );
+                                retried += 1;
+                            }
+                            persist_agent_os_state(&mut context, &agent_state);
+                            context_manager.save(&context).await?;
+                            println!("🔁 Queued {} retries from completed tasks", retried);
+                            continue;
+                        }
+                        if target == "all" {
+                            let candidates = agent_state
+                                .supervisor
+                                .tasks
+                                .iter()
+                                .filter(|task| {
+                                    task.status == SupervisedTaskStatus::Completed
+                                        || task.status == SupervisedTaskStatus::Failed
+                                        || task.status == SupervisedTaskStatus::Cancelled
+                                })
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            if candidates.is_empty() {
+                                println!("ℹ️  No completed/failed/cancelled supervisor tasks to retry.");
+                                continue;
+                            }
+                            let mut retried = 0usize;
+                            for task in candidates {
+                                let retry_id = enqueue_supervised_task(
+                                    &mut agent_state,
+                                    task.prompt.clone(),
+                                    task.class.clone(),
+                                );
+                                push_task_event(
+                                    &task_event_feed,
+                                    format!("sup {} retried as {}", task.id, retry_id),
+                                );
+                                retried += 1;
+                            }
+                            persist_agent_os_state(&mut context, &agent_state);
+                            context_manager.save(&context).await?;
+                            println!(
+                                "🔁 Queued {} retries from completed/failed/cancelled tasks",
+                                retried
+                            );
+                            continue;
+                        }
+                        let snapshot = agent_state
+                            .supervisor
+                            .tasks
+                            .iter()
+                            .find(|task| task.id == target)
+                            .cloned();
+                        let Some(task) = snapshot else {
+                            println!("❌ Supervisor task '{}' not found", target);
+                            continue;
+                        };
+                        if matches!(
+                            task.status,
+                            SupervisedTaskStatus::Queued | SupervisedTaskStatus::Running
+                        ) {
+                            println!(
+                                "⚠️  Task {} is currently {}. Stop/wait before retry.",
+                                target,
+                                format!("{:?}", task.status).to_lowercase()
+                            );
+                            continue;
+                        }
+                        let retry_id = enqueue_supervised_task(
+                            &mut agent_state,
+                            task.prompt.clone(),
+                            task.class.clone(),
+                        );
+                        push_task_event(
+                            &task_event_feed,
+                            format!("sup {} retried as {}", target, retry_id),
+                        );
+                        persist_agent_os_state(&mut context, &agent_state);
+                        context_manager.save(&context).await?;
+                        println!("🔁 Queued retry {} from {}", retry_id, target);
+                        continue;
+                    }
+                }
+
+                if !input_from_queue && (input == "queue run" || input == "/queue run") {
+                    match start_next_queued_supervised_task(&mut agent_state) {
+                        QueueStartResult::Started(task) => {
+                            if can_run_supervisor_in_background(&task) {
+                                let bg_task_id = format!("supbg-{}", task.id);
+                                let bg_description = format!(
+                                    "supervisor {} {}",
+                                    task.id,
+                                    truncate_for_table(&task.prompt, 56)
+                                );
+                                let task_prompt = task.prompt.clone();
+                                let task_id = task.id.clone();
+                                let task_class = task.class.clone();
+                                let timeout_bg =
+                                    watchdog_timeout_for_class(&task_class, &agent_state.autonomy_mode);
+                                let max_iter_bg = active_soul
+                                    .max_iterations
+                                    .min(
+                                        execution_budget_for_class(
+                                            &task_class,
+                                            &agent_state.autonomy_mode,
+                                        )
+                                        .max_iterations,
+                                    )
+                                    .max(1);
+                                let provider_bg = config.provider.clone();
+                                let model_bg = config.model.clone();
+                                let async_session_bg = async_session.clone();
+                                let async_locks_bg = async_locks.clone();
+                                let runtime_dispatcher_bg = runtime_dispatcher.clone();
+                                let registry_arc_bg = registry_arc.clone();
+                                let allowed_tools_bg = active_allowed_tools.clone();
+                                let task_session_key = format!("{}::sup::{}", session_key, task_id);
+                                let agent_name_bg = agent_name.clone();
+                                let system_prompt_bg = augment_system_prompt_for_turn(
+                                    &system_prompt,
+                                    &agent_state.onboarding.system_profile,
+                                    &capability_registry,
+                                    &active_allowed_tools,
+                                    &agent_state.autonomy_mode,
+                                );
+
+                                let spawn_result = task_manager
+                                    .spawn_task(bg_task_id.clone(), bg_description, move || async move {
+                                        let llm_client = build_llm_client_for_provider(
+                                            &provider_bg,
+                                            &model_bg,
+                                        )
+                                        .map_err(|e| format!("LLM client init failed: {}", e))?;
+                                        let allowed_state_bg =
+                                            Arc::new(RwLock::new(allowed_tools_bg));
+                                        let runtime_registry_bg = Arc::new(
+                                            RuntimeRegistryAdapter::new(
+                                                registry_arc_bg,
+                                                allowed_state_bg,
+                                            ),
+                                        );
+                                        let compactor = hypr_claw_runtime::Compactor::new(
+                                            4000,
+                                            SimpleSummarizer,
+                                        );
+                                        let agent_loop_bg = hypr_claw_runtime::AgentLoop::new(
+                                            async_session_bg,
+                                            async_locks_bg,
+                                            runtime_dispatcher_bg,
+                                            runtime_registry_bg,
+                                            llm_client,
+                                            compactor,
+                                            max_iter_bg,
+                                        );
+                                        match tokio::time::timeout(
+                                            timeout_bg,
+                                            agent_loop_bg.run(
+                                                &task_session_key,
+                                                &agent_name_bg,
+                                                &system_prompt_bg,
+                                                &task_prompt,
+                                            ),
+                                        )
+                                        .await
+                                        {
+                                            Ok(Ok(response)) => Ok(response),
+                                            Ok(Err(e)) => Err(e.to_string()),
+                                            Err(_) => Err(format!(
+                                                "Execution watchdog timeout after {}s",
+                                                timeout_bg.as_secs()
+                                            )),
+                                        }
+                                    })
+                                    .await;
+
+                                match spawn_result {
+                                    Ok(background_id) => {
+                                        set_supervised_task_background_id(
+                                            &mut agent_state,
+                                            &task_id,
+                                            Some(background_id.clone()),
+                                        );
+                                        supervisor_background_map.insert(task_id.clone(), background_id);
+                                        push_task_event(
+                                            &task_event_feed,
+                                            format!(
+                                                "sup {} running(background) class={} res={}",
+                                                task.id,
+                                                task.class.as_str(),
+                                                truncate_for_table(&task.resources.join(","), 22)
+                                            ),
+                                        );
+                                        println!("▶ Started {} in background", task_id);
+                                    }
+                                    Err(e) => {
+                                        let err = e.to_string();
+                                        set_supervised_task_background_id(
+                                            &mut agent_state,
+                                            &task_id,
+                                            None,
+                                        );
+                                        mark_supervised_task_failed(
+                                            &mut agent_state,
+                                            &task_id,
+                                            err.clone(),
+                                        );
+                                        push_task_event(
+                                            &task_event_feed,
+                                            format!(
+                                                "sup {} background start failed {}",
+                                                task_id,
+                                                truncate_for_table(&err, 56)
+                                            ),
+                                        );
+                                        println!("❌ Failed to start {} in background: {}", task_id, err);
+                                    }
+                                }
+                            } else {
+                                queued_execution = Some(task);
+                            }
+
+                            if let Some(task) = queued_execution.as_ref() {
+                                push_task_event(
+                                    &task_event_feed,
+                                    format!(
+                                        "sup {} running class={} res={}",
+                                        task.id,
+                                        task.class.as_str(),
+                                        truncate_for_table(&task.resources.join(","), 22)
+                                    ),
+                                );
+                            }
+                            persist_agent_os_state(&mut context, &agent_state);
+                            context_manager.save(&context).await?;
+                        }
+                        QueueStartResult::Blocked(reason) => {
+                            push_task_event(&task_event_feed, format!("sup queue blocked: {}", reason));
+                            println!("⏸ Cannot start queued task: {}", reason);
+                            continue;
+                        }
+                        QueueStartResult::Empty => {
+                            push_task_event(&task_event_feed, "sup queue empty");
+                            println!("ℹ️  No queued tasks.");
+                            continue;
+                        }
+                    }
                 }
 
                 if !input_from_queue {
@@ -688,6 +1799,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 agent_state.supervisor.auto_run = true;
                                 persist_agent_os_state(&mut context, &agent_state);
                                 context_manager.save(&context).await?;
+                                push_task_event(&task_event_feed, "sup auto-run enabled");
                                 println!("✅ Supervisor auto-run enabled");
                             }
                             "off" => {
@@ -695,6 +1807,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 auto_queued_task = None;
                                 persist_agent_os_state(&mut context, &agent_state);
                                 context_manager.save(&context).await?;
+                                push_task_event(&task_event_feed, "sup auto-run disabled");
                                 println!("✅ Supervisor auto-run disabled");
                             }
                             _ => println!("Use: queue auto on|off"),
@@ -812,7 +1925,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
-                if input == "soul list" {
+                if input == "soul list" || input == "/soul list" {
                     println!("\n🧬 Available Souls ({}):", available_souls.len());
                     for soul_id in &available_souls {
                         let marker = if soul_id == &active_soul_id { "*" } else { " " };
@@ -822,7 +1935,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
-                if let Some(raw_mode) = input.strip_prefix("soul auto ").map(str::trim) {
+                if let Some(raw_mode) = input
+                    .strip_prefix("soul auto ")
+                    .or_else(|| input.strip_prefix("/soul auto "))
+                    .map(str::trim)
+                {
                     match raw_mode {
                         "on" => {
                             agent_state.soul_auto = true;
@@ -841,7 +1958,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
-                if let Some(soul_id) = input.strip_prefix("soul switch ").map(str::trim) {
+                if let Some(soul_id) = input
+                    .strip_prefix("soul switch ")
+                    .or_else(|| input.strip_prefix("/soul switch "))
+                    .map(str::trim)
+                {
                     match switch_soul(soul_id, &runtime_registry, &agent_tools).await {
                         Ok((profile, resolved_tools)) => {
                             let resolved_count = resolved_tools.len();
@@ -890,28 +2011,91 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .into_iter()
                             .filter(|task| task.status == hypr_claw_tasks::TaskStatus::Running)
                             .collect::<Vec<_>>();
-                        if has_running_background_conflict(&input, &running_background) {
+                        if let Some(conflict_reason) =
+                            running_background_conflict_reason(&input, &running_background)
+                        {
                             println!(
-                                "⚠️  Conflict detected with running background tasks (exclusive desktop interaction)."
+                                "⚠️  Conflict detected with running background tasks: {}",
+                                conflict_reason
                             );
-                            if prompt_yes_no(
-                                "Queue this task and continue background work? [Y/n] ",
-                                true,
-                            )? {
-                                let queued_id = enqueue_supervised_task(
-                                    &mut agent_state,
-                                    input.clone(),
-                                    class.clone(),
-                                );
-                                persist_agent_os_state(&mut context, &agent_state);
-                                context_manager.save(&context).await?;
-                                println!("🗂 Queued as {}", queued_id);
-                                continue;
+                            println!("Choose: [q] queue new task, [r] run now, [c] cancel running background tasks and run");
+                            let decision = prompt_line("Conflict action [q/r/c] (default q): ")?;
+                            match decision.trim().to_lowercase().as_str() {
+                                "" | "q" | "queue" => {
+                                    let queued_id = enqueue_supervised_task(
+                                        &mut agent_state,
+                                        input.clone(),
+                                        class.clone(),
+                                    );
+                                    persist_agent_os_state(&mut context, &agent_state);
+                                    context_manager.save(&context).await?;
+                                    push_task_event(
+                                        &task_event_feed,
+                                        format!("sup {} queued due to conflict", queued_id),
+                                    );
+                                    println!("🗂 Queued as {}", queued_id);
+                                    continue;
+                                }
+                                "c" | "cancel" => {
+                                    let running_ids = running_background
+                                        .iter()
+                                        .map(|t| t.id.clone())
+                                        .collect::<Vec<_>>();
+                                    let mut cancelled = 0usize;
+                                    for task_id in running_ids {
+                                        if task_manager.cancel_task(&task_id).await.is_ok() {
+                                            cancelled += 1;
+                                            push_task_event(
+                                                &task_event_feed,
+                                                format!("bg {} cancelled due to conflict policy", task_id),
+                                            );
+                                        }
+                                    }
+                                    context.active_tasks = to_context_tasks(task_manager.list_tasks().await);
+                                    println!("🧹 Cancelled {} running background task(s)", cancelled);
+                                }
+                                "r" | "run" | "run_now" | "now" => {
+                                    push_task_event(
+                                        &task_event_feed,
+                                        "sup conflict policy: run-now over background tasks",
+                                    );
+                                }
+                                _ => {
+                                    let queued_id = enqueue_supervised_task(
+                                        &mut agent_state,
+                                        input.clone(),
+                                        class.clone(),
+                                    );
+                                    persist_agent_os_state(&mut context, &agent_state);
+                                    context_manager.save(&context).await?;
+                                    push_task_event(
+                                        &task_event_feed,
+                                        format!("sup {} queued due to invalid conflict choice", queued_id),
+                                    );
+                                    println!("🗂 Invalid choice. Queued as {}", queued_id);
+                                    continue;
+                                }
                             }
                         }
 
                         let task_id =
                             start_supervised_task(&mut agent_state, input.clone(), class.clone());
+                        if let Some(task) = agent_state
+                            .supervisor
+                            .tasks
+                            .iter()
+                            .find(|task| task.id == task_id)
+                        {
+                            push_task_event(
+                                &task_event_feed,
+                                format!(
+                                    "sup {} running class={} res={}",
+                                    task.id,
+                                    task.class.as_str(),
+                                    truncate_for_table(&task.resources.join(","), 22)
+                                ),
+                            );
+                        }
                         (
                             input.clone(),
                             class,
@@ -977,6 +2161,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .min(class_budget.max_iterations)
                     .max(1);
                 agent_loop.set_max_iterations(effective_max_iterations);
+                let run_mode = agent_state.autonomy_mode.clone();
                 let run_started_at = Instant::now();
                 let mut fallback_attempts = 0u32;
                 agent_state.reliability.run_id = agent_state.reliability.run_id.saturating_add(1);
@@ -999,6 +2184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut turn_system_prompt = augment_system_prompt_for_turn(
                     &system_prompt,
                     &agent_state.onboarding.system_profile,
+                    &capability_registry,
                     &active_allowed_tools,
                     &agent_state.autonomy_mode,
                 );
@@ -1023,6 +2209,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Ok(_) => break,
                         Err(err) => err.to_string(),
                     };
+
+                    let err_lower = err_msg.to_lowercase();
+                    let is_rate_limit_error = err_lower.contains("rate limit")
+                        || err_lower.contains("too many requests")
+                        || err_lower.contains("resource_exhausted")
+                        || err_lower.contains("429");
+                    if is_rate_limit_error {
+                        let wait_secs = extract_retry_after_seconds(&err_msg).unwrap_or(0);
+                        if wait_secs > 0
+                            && wait_secs <= 12
+                            && fallback_attempts < MAX_RECOVERY_ATTEMPTS
+                        {
+                            fallback_attempts += 1;
+                            agent_state.reliability.last_stage =
+                                "recovery_provider_rate_limit".to_string();
+                            agent_state.reliability.fallback_attempts = fallback_attempts;
+                            println!(
+                                "⏳ Provider rate-limited. Retrying in {}s...",
+                                wait_secs
+                            );
+                            tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+                            run_result = run_with_interrupt_and_timeout(
+                                &agent_loop,
+                                &task_session_key,
+                                &agent_name,
+                                &turn_system_prompt,
+                                &effective_input,
+                                &interrupt,
+                                watchdog_timeout,
+                            )
+                            .await;
+                            continue;
+                        }
+                        agent_state.reliability.last_stage = "provider_rate_limited".to_string();
+                        break;
+                    }
 
                     if fallback_attempts >= MAX_RECOVERY_ATTEMPTS {
                         agent_state.reliability.last_stage =
@@ -1079,6 +2301,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     turn_system_prompt = augment_system_prompt_for_turn(
                                         &system_prompt,
                                         &agent_state.onboarding.system_profile,
+                                        &capability_registry,
                                         &active_allowed_tools,
                                         &agent_state.autonomy_mode,
                                     );
@@ -1174,8 +2397,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         agent_state.reliability.last_break_reason = "STOP_NONE".to_string();
                         agent_state.reliability.last_error.clear();
                         agent_state.reliability.updated_at = Some(chrono::Utc::now().timestamp());
+                        record_autonomy_outcome(
+                            &mut agent_state,
+                            &run_mode,
+                            true,
+                            run_elapsed_ms,
+                            fallback_attempts,
+                            "STOP_NONE",
+                        );
                         if let Some(task_id) = &supervisor_task_id {
-                            mark_supervised_task_completed(&mut agent_state, task_id);
+                            if supervised_task_status(&agent_state, task_id)
+                                != Some(SupervisedTaskStatus::Cancelled)
+                            {
+                                mark_supervised_task_completed(&mut agent_state, task_id);
+                                push_task_event(
+                                    &task_event_feed,
+                                    format!("sup {} completed in {}ms", task_id, run_elapsed_ms),
+                                );
+                            } else {
+                                push_task_event(
+                                    &task_event_feed,
+                                    format!("sup {} completion ignored (already cancelled)", task_id),
+                                );
+                            }
                         }
                         context.recent_history.push(hypr_claw_memory::types::HistoryEntry {
                             timestamp: chrono::Utc::now().timestamp(),
@@ -1199,8 +2443,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         agent_state.reliability.last_break_reason = stop_code.to_string();
                         agent_state.reliability.last_error = error_msg.clone();
                         agent_state.reliability.updated_at = Some(chrono::Utc::now().timestamp());
+                        record_autonomy_outcome(
+                            &mut agent_state,
+                            &run_mode,
+                            false,
+                            run_elapsed_ms,
+                            fallback_attempts,
+                            stop_code,
+                        );
                         if let Some(task_id) = &supervisor_task_id {
-                            mark_supervised_task_failed(&mut agent_state, task_id, error_msg.clone());
+                            if supervised_task_status(&agent_state, task_id)
+                                != Some(SupervisedTaskStatus::Cancelled)
+                            {
+                                mark_supervised_task_failed(
+                                    &mut agent_state,
+                                    task_id,
+                                    error_msg.clone(),
+                                );
+                                push_task_event(
+                                    &task_event_feed,
+                                    format!(
+                                        "sup {} failed code={} {}",
+                                        task_id,
+                                        stop_code,
+                                        truncate_for_table(&error_msg, 60)
+                                    ),
+                                );
+                            } else {
+                                push_task_event(
+                                    &task_event_feed,
+                                    format!("sup {} failed ignored (already cancelled)", task_id),
+                                );
+                            }
                         }
                         mark_plan_failed(&mut context, &error_msg);
                         persist_agent_os_state(&mut context, &agent_state);
@@ -1256,6 +2530,7 @@ fn initialize_directories() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all("./data/agents")?;
     std::fs::create_dir_all("./data/context")?;
     std::fs::create_dir_all("./data/tasks")?;
+    std::fs::create_dir_all("./data/capabilities")?;
 
     if !std::path::Path::new("./data/audit.log").exists() {
         std::fs::File::create("./data/audit.log")?;
@@ -1372,6 +2647,167 @@ fn normalize_runtime_tool_name(name: &str) -> String {
     }
 }
 
+fn max_view_offset(total: usize, page: usize) -> usize {
+    let page = page.max(1);
+    total.saturating_sub(page)
+}
+
+fn tail_window_slice<T: Clone>(
+    items: &[T],
+    offset_from_latest: usize,
+    page_size: usize,
+) -> (Vec<T>, usize, usize, usize) {
+    if items.is_empty() {
+        return (Vec::new(), 0, 0, 0);
+    }
+    let page = page_size.max(1);
+    let total = items.len();
+    let clamped_offset = offset_from_latest.min(max_view_offset(total, page));
+    let end = total.saturating_sub(clamped_offset);
+    let start = end.saturating_sub(page);
+    (items[start..end].to_vec(), start + 1, end, total)
+}
+
+fn action_feed_total(feed: &Arc<Mutex<Vec<String>>>) -> usize {
+    feed.lock().ok().map(|f| f.len()).unwrap_or(0)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaskStateDigest {
+    status: String,
+    progress_percent: u16,
+    error: String,
+    result: String,
+}
+
+fn now_hms() -> String {
+    chrono::Utc::now().format("%H:%M:%S").to_string()
+}
+
+fn push_task_event(feed: &Arc<Mutex<Vec<String>>>, message: impl Into<String>) {
+    let line = format!("{} {}", now_hms(), message.into());
+    if let Ok(mut rows) = feed.lock() {
+        rows.push(line);
+        if rows.len() > 320 {
+            let drop_count = rows.len() - 320;
+            rows.drain(0..drop_count);
+        }
+    }
+}
+
+fn digest_task_state(task: &hypr_claw_tasks::TaskInfo) -> TaskStateDigest {
+    TaskStateDigest {
+        status: format!("{:?}", task.status).to_lowercase(),
+        progress_percent: (task.progress.clamp(0.0, 1.0) * 100.0).round() as u16,
+        error: task.error.clone().unwrap_or_default(),
+        result: task.result.clone().unwrap_or_default(),
+    }
+}
+
+fn sync_background_task_events(
+    task_list: &[hypr_claw_tasks::TaskInfo],
+    index: &mut HashMap<String, TaskStateDigest>,
+    feed: &Arc<Mutex<Vec<String>>>,
+) {
+    let mut seen = HashSet::new();
+
+    for task in task_list {
+        seen.insert(task.id.clone());
+        let next = digest_task_state(task);
+        match index.get(&task.id) {
+            None => {
+                push_task_event(
+                    feed,
+                    format!(
+                        "bg {} created status={} {}%",
+                        task.id, next.status, next.progress_percent
+                    ),
+                );
+            }
+            Some(prev) if prev != &next => {
+                let mut detail = format!(
+                    "bg {} {}->{} {}%->{}%",
+                    task.id, prev.status, next.status, prev.progress_percent, next.progress_percent
+                );
+                if !next.error.is_empty() {
+                    detail.push_str(&format!(" err={}", truncate_for_table(&next.error, 40)));
+                } else if !next.result.is_empty() {
+                    detail.push_str(&format!(" out={}", truncate_for_table(&next.result, 40)));
+                }
+                push_task_event(feed, detail);
+            }
+            _ => {}
+        }
+        index.insert(task.id.clone(), next);
+    }
+
+    let removed = index
+        .keys()
+        .filter(|id| !seen.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    for id in removed {
+        index.remove(&id);
+        push_task_event(feed, format!("bg {} removed from active cache", id));
+    }
+}
+
+fn build_task_log_lines(
+    task_list: &[hypr_claw_tasks::TaskInfo],
+    agent_state: &AgentOsState,
+    task_event_feed: &Arc<Mutex<Vec<String>>>,
+) -> Vec<String> {
+    let mut rows: Vec<(i64, String)> = Vec::new();
+
+    if let Ok(events) = task_event_feed.lock() {
+        for line in events.iter() {
+            rows.push((chrono::Utc::now().timestamp(), format!("evt {}", line)));
+        }
+    }
+
+    for task in task_list {
+        let mut line = format!(
+            "bg {} {} {:>3}% {}",
+            task.id,
+            format!("{:?}", task.status).to_lowercase(),
+            (task.progress.clamp(0.0, 1.0) * 100.0).round() as u16,
+            truncate_for_table(&task.description, 44),
+        );
+        if let Some(err) = &task.error {
+            line.push_str(&format!(" | err: {}", truncate_for_table(err, 36)));
+        } else if let Some(result) = &task.result {
+            line.push_str(&format!(" | out: {}", truncate_for_table(result, 36)));
+        }
+        rows.push((task.updated_at, line));
+    }
+
+    for task in &agent_state.supervisor.tasks {
+        let mut line = format!(
+            "sup {} {} {} {}",
+            task.id,
+            format!("{:?}", task.status).to_lowercase(),
+            task.class.as_str(),
+            truncate_for_table(&task.prompt, 36),
+        );
+        if !task.resources.is_empty() {
+            line.push_str(&format!(
+                " | res: {}",
+                truncate_for_table(&task.resources.join(","), 20)
+            ));
+        }
+        if let Some(bg_id) = &task.background_task_id {
+            line.push_str(&format!(" | bg: {}", truncate_for_table(bg_id, 18)));
+        }
+        if let Some(err) = &task.error {
+            line.push_str(&format!(" | err: {}", truncate_for_table(err, 34)));
+        }
+        rows.push((task.updated_at, line));
+    }
+
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows.into_iter().map(|(_, line)| line).collect()
+}
+
 fn build_tui_snapshot(
     provider_name: &str,
     model: &str,
@@ -1383,6 +2819,9 @@ fn build_tui_snapshot(
     task_list: &[hypr_claw_tasks::TaskInfo],
     soul_count: usize,
     action_feed: &Arc<Mutex<Vec<String>>>,
+    task_event_feed: &Arc<Mutex<Vec<String>>>,
+    tui_live_mode: bool,
+    tui_view: &TuiViewState,
 ) -> tui::TuiSnapshot {
     let running = task_list
         .iter()
@@ -1470,9 +2909,63 @@ fn build_tui_snapshot(
                 SupervisedTaskStatus::Cancelled => "cancel".to_string(),
             },
             class: t.class.as_str().to_string(),
+            resources: if t.resources.is_empty() {
+                "general".to_string()
+            } else {
+                truncate_for_table(&t.resources.join(","), 12)
+            },
+            background_task_id: t
+                .background_task_id
+                .as_deref()
+                .map(|id| truncate_for_table(id, 12))
+                .unwrap_or_else(|| "-".to_string()),
             prompt: t.prompt,
         })
         .collect::<Vec<_>>();
+
+    let mut actionable_ids = Vec::<String>::new();
+    let mut supervisor_all = agent_state.supervisor.tasks.clone();
+    supervisor_all.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    for task in supervisor_all
+        .iter()
+        .filter(|task| {
+            task.status == SupervisedTaskStatus::Queued
+                || task.status == SupervisedTaskStatus::Running
+        })
+        .take(6)
+    {
+        let bg = task.background_task_id.as_deref().unwrap_or("-");
+        actionable_ids.push(format!(
+            "stop: {} | bg: {}",
+            truncate_for_table(&task.id, 14),
+            truncate_for_table(bg, 18)
+        ));
+    }
+    for task in supervisor_all
+        .iter()
+        .filter(|task| {
+            matches!(
+                task.status,
+                SupervisedTaskStatus::Completed
+                    | SupervisedTaskStatus::Failed
+                    | SupervisedTaskStatus::Cancelled
+            )
+        })
+        .take(4)
+    {
+        actionable_ids.push(format!(
+            "retry: {} ({})",
+            truncate_for_table(&task.id, 14),
+            truncate_for_table(&format!("{:?}", task.status).to_lowercase(), 10)
+        ));
+    }
+    if !supervisor_all.is_empty() {
+        actionable_ids.push("prune: queue prune 200".to_string());
+        actionable_ids.push("stop-all: queue stop all".to_string());
+        actionable_ids.push("retry-failed: queue retry failed".to_string());
+        actionable_ids.push("retry-completed: queue retry completed".to_string());
+        actionable_ids.push("retry-all: queue retry all".to_string());
+    }
 
     let plan = context
         .current_plan
@@ -1488,18 +2981,27 @@ fn build_tui_snapshot(
         })
         .unwrap_or_else(|| "none".to_string());
 
-    let action_feed = action_feed
+    let action_feed_all = action_feed
         .lock()
         .ok()
         .map(|g| g.clone())
         .unwrap_or_default();
-    let recent_messages = context
+    let (action_feed, action_start, action_end, action_total) =
+        tail_window_slice(&action_feed_all, tui_view.feed_offset, tui_view.feed_page);
+
+    let messages_all = context
         .recent_history
         .iter()
-        .rev()
-        .take(12)
         .map(|h| format!("{}: {}", h.role, h.content))
         .collect::<Vec<_>>();
+    let (recent_messages, msg_start, msg_end, msg_total) = tail_window_slice(
+        &messages_all,
+        tui_view.messages_offset,
+        tui_view.messages_page,
+    );
+    let task_log_all = build_task_log_lines(task_list, agent_state, task_event_feed);
+    let (task_log, log_start, log_end, log_total) =
+        tail_window_slice(&task_log_all, tui_view.log_offset, tui_view.log_page);
 
     tui::TuiSnapshot {
         provider: provider_name.to_string(),
@@ -1509,6 +3011,7 @@ fn build_tui_snapshot(
         soul: active_soul_id.to_string(),
         autonomy_mode: agent_state.autonomy_mode.as_str().to_string(),
         thread: agent_state.active_thread_id.clone(),
+        live_mode: tui_live_mode,
         souls_count: soul_count,
         task_counts: (task_list.len(), running, done, failed),
         supervisor_counts: (
@@ -1537,6 +3040,23 @@ fn build_tui_snapshot(
         supervisor_tasks,
         action_feed,
         recent_messages,
+        action_feed_window: if action_total == 0 {
+            "0/0".to_string()
+        } else {
+            format!("{}-{} / {}", action_start, action_end, action_total)
+        },
+        recent_messages_window: if msg_total == 0 {
+            "0/0".to_string()
+        } else {
+            format!("{}-{} / {}", msg_start, msg_end, msg_total)
+        },
+        task_log,
+        task_log_window: if log_total == 0 {
+            "0/0".to_string()
+        } else {
+            format!("{}-{} / {}", log_start, log_end, log_total)
+        },
+        actionable_ids,
     }
 }
 
@@ -1707,7 +3227,7 @@ fn print_console_bootstrap(
         ui_dim(&format!(
             "║ Commands: {:<58}║",
             truncate_for_table(
-                "help, status, dashboard, /tui, /models, soul, /task, queue, autonomy...",
+                "help, status, dashboard, capabilities, /tui, /models, soul, /task, queue, autonomy...",
                 58
             )
         ))
@@ -1726,13 +3246,17 @@ fn print_help() {
     println!("    status                Runtime state snapshot");
     println!("    dashboard | /dashboard|dash  Extended operational dashboard");
     println!("    tui | /tui            Open full-screen command center");
-    println!("      (inside TUI: :q close, :r refresh, :exit quit app)");
+    println!("      (inside TUI: :q close, :r refresh, :live-on/:live-off)");
+    println!("    /tui live on|off      Enable/disable timed TUI auto-refresh");
     println!("    repl | /repl          Return to standard prompt mode");
     println!("    scan                  Re-run standard/deep system learning scan");
+    println!("    capabilities          Show runtime capability registry summary");
     println!("    trust on|off          Toggle trusted full-auto execution mode");
     println!("    autonomy <mode>       Set autonomy mode (prompt_first|guarded)");
+    println!("    autonomy stats        Show prompt_first vs guarded metrics");
+    println!("    autonomy reset        Reset autonomy calibration metrics");
     println!("    clear                 Clear terminal");
-    println!("    interrupt             Show interrupt hint (Ctrl+C)");
+    println!("    interrupt             Send interrupt signal to active run");
     println!("    exit | quit           Exit agent");
     println!("  {}", ui_accent("Models"));
     println!("    /models               Interactive model switch");
@@ -1749,10 +3273,22 @@ fn print_help() {
     println!("    /task switch <id>     Switch active thread");
     println!("    /task close <id>      Archive thread");
     println!("    queue                 Show supervisor queue");
+    println!("    queue status          Compact queue summary + actionable IDs");
     println!("    queue add <prompt>    Add task prompt to queue");
     println!("    queue run             Run next queued task");
     println!("    queue clear           Cancel queued items");
+    println!("    queue prune [N]       Prune old terminal tasks (default keep latest 200)");
+    println!("    queue stop all        Stop all queued/running supervisor tasks");
+    println!("    queue stop <id>       Stop queued/running task by sup_id or bg_id");
+    println!("    queue retry failed    Retry all failed/cancelled supervisor tasks");
+    println!("    queue retry completed Retry all completed supervisor tasks");
+    println!("    queue retry all       Retry all completed/failed/cancelled tasks");
+    println!("    queue retry <id>      Re-enqueue a completed/failed/cancelled task");
     println!("    queue auto on|off     Toggle auto-run for queued tasks");
+    println!("    /tui feed up|down|top|latest   Scroll TUI decision feed");
+    println!("    /tui log up|down|top|latest    Scroll TUI task log");
+    println!("    /tui msgs up|down|top|latest   Scroll TUI recent messages");
+    println!("    /tui view reset       Reset TUI scroll offsets");
     println!("  {}", ui_accent("System"));
     println!("    profile               Show learned system profile");
     println!("    scan                  Re-run system scan");
@@ -1818,10 +3354,98 @@ fn reliability_summary(state: &AgentOsState) -> String {
     )
 }
 
+fn record_autonomy_outcome(
+    state: &mut AgentOsState,
+    mode: &AutonomyMode,
+    succeeded: bool,
+    duration_ms: u64,
+    fallback_attempts: u32,
+    stop_code: &str,
+) {
+    let metrics = match mode {
+        AutonomyMode::PromptFirst => &mut state.autonomy_calibration.prompt_first,
+        AutonomyMode::Guarded => &mut state.autonomy_calibration.guarded,
+    };
+    metrics.runs = metrics.runs.saturating_add(1);
+    if succeeded {
+        metrics.successes = metrics.successes.saturating_add(1);
+    } else {
+        metrics.failures = metrics.failures.saturating_add(1);
+    }
+    metrics.total_duration_ms = metrics.total_duration_ms.saturating_add(duration_ms);
+    metrics.total_fallback_attempts = metrics
+        .total_fallback_attempts
+        .saturating_add(fallback_attempts as u64);
+    let entry = metrics.stop_codes.entry(stop_code.to_string()).or_insert(0);
+    *entry = entry.saturating_add(1);
+}
+
+fn autonomy_mode_summary(label: &str, metrics: &AutonomyModeMetrics) -> String {
+    let runs = metrics.runs.max(1);
+    let success_pct = (metrics.successes as f64 * 100.0) / runs as f64;
+    let avg_ms = metrics.total_duration_ms / runs;
+    let avg_fallback = metrics.total_fallback_attempts as f64 / runs as f64;
+    let top_stop = metrics
+        .stop_codes
+        .iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(code, count)| format!("{}({})", code, count))
+        .unwrap_or_else(|| "none".to_string());
+    format!(
+        "{} runs={} succ={} fail={} succ%={:.1} avg_ms={} avg_fb={:.2} top_stop={}",
+        label,
+        metrics.runs,
+        metrics.successes,
+        metrics.failures,
+        success_pct,
+        avg_ms,
+        avg_fallback,
+        top_stop
+    )
+}
+
+fn print_autonomy_stats(state: &AgentOsState) {
+    println!("\n{}", ui_title("Autonomy Calibration Stats"));
+    println!(
+        "  {}",
+        autonomy_mode_summary("prompt_first", &state.autonomy_calibration.prompt_first)
+    );
+    println!(
+        "  {}",
+        autonomy_mode_summary("guarded", &state.autonomy_calibration.guarded)
+    );
+    println!();
+}
+
+fn extract_retry_after_seconds(error_msg: &str) -> Option<u64> {
+    let mut num = String::new();
+    for ch in error_msg.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            num.push(ch);
+            continue;
+        }
+        if matches!(ch, 's' | 'S') && !num.is_empty() {
+            if let Ok(value) = num.parse::<f64>() {
+                if value > 0.0 {
+                    return Some(value.ceil() as u64);
+                }
+            }
+        }
+        num.clear();
+    }
+    None
+}
+
 fn stop_code_for_error(error_msg: &str) -> &'static str {
     let lower = error_msg.to_lowercase();
     if lower.contains("interrupted by user") {
         "STOP_USER_INTERRUPT"
+    } else if lower.contains("rate limit")
+        || lower.contains("too many requests")
+        || lower.contains("resource_exhausted")
+        || lower.contains("429")
+    {
+        "STOP_PROVIDER_RATE_LIMIT"
     } else if lower.contains("watchdog timeout") {
         "STOP_WATCHDOG_TIMEOUT"
     } else if lower.contains("repetitive tool loop") {
@@ -1862,6 +3486,7 @@ fn remediation_hint_for_stop_code(stop_code: &str, input: &str) -> String {
         "STOP_TOOL_FAILURE_STREAK" => "Multiple tools failed in a row. Verify required apps/backends are installed and available in PATH.".to_string(),
         "STOP_TOOL_ENFORCEMENT" => "No valid actionable tool path was produced. Use an imperative prompt like 'open X', 'create Y', or 'run Z'.".to_string(),
         "STOP_PROVIDER_ARGUMENT" => "Provider rejected the request format. Switch model with '/models' or retry after reducing prompt complexity.".to_string(),
+        "STOP_PROVIDER_RATE_LIMIT" => "Provider quota/rate limit hit. Wait for retry window, switch to a lower-traffic model, or use a different provider key.".to_string(),
         "STOP_MAX_ITERATIONS" => {
             if lower.contains("gmail") || lower.contains("telegram") || lower.contains("mail") {
                 "For inbox/chat tasks, request one concrete step first (open + capture), then ask for summary in next prompt.".to_string()
@@ -1930,6 +3555,23 @@ fn print_status_panel(
     println!(
         "  Autonomy     : {}",
         ui_info(agent_state.autonomy_mode.as_str())
+    );
+    println!(
+        "  AutoStats    : {}",
+        truncate_for_table(
+            &autonomy_mode_summary(
+                "prompt_first",
+                &agent_state.autonomy_calibration.prompt_first
+            ),
+            96
+        )
+    );
+    println!(
+        "                 {}",
+        truncate_for_table(
+            &autonomy_mode_summary("guarded", &agent_state.autonomy_calibration.guarded),
+            96
+        )
     );
     println!(
         "  Trust Mode   : {}",
@@ -2052,6 +3694,25 @@ fn print_runtime_dashboard(
         "{} {}",
         ui_dim("Autonomy:"),
         ui_info(agent_state.autonomy_mode.as_str())
+    );
+    println!(
+        "{} {}",
+        ui_dim("AutoStats:"),
+        truncate_for_table(
+            &autonomy_mode_summary(
+                "prompt_first",
+                &agent_state.autonomy_calibration.prompt_first
+            ),
+            76
+        )
+    );
+    println!(
+        "{} {}",
+        ui_dim("           "),
+        truncate_for_table(
+            &autonomy_mode_summary("guarded", &agent_state.autonomy_calibration.guarded),
+            76
+        )
     );
     println!(
         "{} {} | {} {}",
@@ -2330,6 +3991,42 @@ where
     }
 }
 
+fn build_llm_client_for_provider(
+    provider: &LLMProvider,
+    model: &str,
+) -> Result<hypr_claw_runtime::LLMClientType, String> {
+    match provider {
+        LLMProvider::Nvidia => {
+            let api_key = bootstrap::get_nvidia_api_key().map_err(|e| e.to_string())?;
+            Ok(hypr_claw_runtime::LLMClientType::Standard(
+                hypr_claw_runtime::LLMClient::with_api_key_and_model(
+                    provider.base_url(),
+                    1,
+                    api_key,
+                    model.to_string(),
+                ),
+            ))
+        }
+        LLMProvider::Google => {
+            let api_key = bootstrap::get_google_api_key().map_err(|e| e.to_string())?;
+            Ok(hypr_claw_runtime::LLMClientType::Standard(
+                hypr_claw_runtime::LLMClient::with_api_key_and_model(
+                    provider.base_url(),
+                    1,
+                    api_key,
+                    model.to_string(),
+                ),
+            ))
+        }
+        LLMProvider::Local { .. } => Ok(hypr_claw_runtime::LLMClientType::Standard(
+            hypr_claw_runtime::LLMClient::new(provider.base_url(), 1),
+        )),
+        LLMProvider::Codex | LLMProvider::Antigravity | LLMProvider::GeminiCli => {
+            Err("Provider does not support agent-mode tool calling".to_string())
+        }
+    }
+}
+
 fn to_context_tasks(
     task_list: Vec<hypr_claw_tasks::TaskInfo>,
 ) -> Vec<hypr_claw_memory::types::TaskState> {
@@ -2434,6 +4131,10 @@ struct SupervisedTask {
     id: String,
     prompt: String,
     class: SupervisedTaskClass,
+    #[serde(default)]
+    resources: Vec<String>,
+    #[serde(default)]
+    background_task_id: Option<String>,
     status: SupervisedTaskStatus,
     created_at: i64,
     updated_at: i64,
@@ -2484,6 +4185,8 @@ struct AgentOsState {
     reliability: ReliabilityState,
     #[serde(default = "default_autonomy_mode")]
     autonomy_mode: AutonomyMode,
+    #[serde(default)]
+    autonomy_calibration: AutonomyCalibrationState,
 }
 
 impl Default for AgentOsState {
@@ -2496,6 +4199,7 @@ impl Default for AgentOsState {
             supervisor: SupervisorState::default(),
             reliability: ReliabilityState::default(),
             autonomy_mode: default_autonomy_mode(),
+            autonomy_calibration: AutonomyCalibrationState::default(),
         }
     }
 }
@@ -2550,6 +4254,30 @@ impl AutonomyMode {
 
 fn default_autonomy_mode() -> AutonomyMode {
     AutonomyMode::PromptFirst
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct AutonomyModeMetrics {
+    #[serde(default)]
+    runs: u64,
+    #[serde(default)]
+    successes: u64,
+    #[serde(default)]
+    failures: u64,
+    #[serde(default)]
+    total_duration_ms: u64,
+    #[serde(default)]
+    total_fallback_attempts: u64,
+    #[serde(default)]
+    stop_codes: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct AutonomyCalibrationState {
+    #[serde(default)]
+    prompt_first: AutonomyModeMetrics,
+    #[serde(default)]
+    guarded: AutonomyModeMetrics,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2924,6 +4652,422 @@ fn set_json_path(root: &mut Value, path: &str, value: Value) {
 
 fn profile_needs_capability_refresh(profile: &Value) -> bool {
     profile.pointer("/capabilities").is_none() || profile.pointer("/paths/downloads").is_none()
+}
+
+fn sanitize_user_key_for_filename(user_id: &str) -> String {
+    let mut out = String::new();
+    for ch in user_id.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "local_user".to_string()
+    } else {
+        out
+    }
+}
+
+fn capability_registry_file_path(user_id: &str) -> String {
+    format!(
+        "./data/capabilities/{}.json",
+        sanitize_user_key_for_filename(user_id)
+    )
+}
+
+fn read_string_array_from_value(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_string)
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default()
+}
+
+fn build_capability_registry(profile: &Value) -> Value {
+    let profile_scanned_at = profile
+        .pointer("/scanned_at")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    let has_deep_scan = profile.pointer("/deep_scan").is_some();
+
+    let wallpaper_backends =
+        read_string_array_from_value(profile.pointer("/capabilities/wallpaper_backends"));
+    let screenshot_backends =
+        read_string_array_from_value(profile.pointer("/capabilities/screenshot_backends"));
+    let input_backends =
+        read_string_array_from_value(profile.pointer("/capabilities/input_backends"));
+    let launcher_commands = read_string_array_from_value(
+        profile.pointer("/deep_scan/desktop_apps/launcher_commands_sample"),
+    );
+    let known_projects =
+        read_string_array_from_value(profile.pointer("/deep_scan/home_inventory/project_roots"));
+
+    let available_commands = profile
+        .pointer("/commands")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(name, enabled)| {
+                    enabled.as_bool().unwrap_or(false).then_some(name.clone())
+                })
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default();
+
+    let vscode_command = ["code", "codium", "code-oss", "vscodium", "code-insiders"]
+        .iter()
+        .find(|name| available_commands.iter().any(|cmd| cmd == **name))
+        .map(|s| (*s).to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let preferred_launchers =
+        build_preferred_launchers(&launcher_commands, &available_commands, &vscode_command);
+
+    json!({
+        "schema_version": 1,
+        "generated_at": chrono::Utc::now().timestamp(),
+        "source_profile_scanned_at": profile_scanned_at,
+        "source_has_deep_scan": has_deep_scan,
+        "platform": {
+            "distro_name": profile.pointer("/platform/distro_name").and_then(|v| v.as_str()).unwrap_or("unknown"),
+            "kernel": profile.pointer("/platform/kernel").and_then(|v| v.as_str()).unwrap_or("unknown"),
+            "arch": profile.pointer("/platform/arch").and_then(|v| v.as_str()).unwrap_or("unknown"),
+            "hyprland_available": profile.pointer("/desktop/hyprland_available").and_then(|v| v.as_bool()).unwrap_or(false),
+            "active_workspace": profile.pointer("/desktop/active_workspace").and_then(|v| v.as_u64()).unwrap_or(0),
+            "workspace_count": profile.pointer("/desktop/workspace_count").and_then(|v| v.as_u64()).unwrap_or(0)
+        },
+        "paths": {
+            "home": profile.pointer("/paths/home").and_then(|v| v.as_str()).unwrap_or(""),
+            "downloads": profile.pointer("/paths/downloads").and_then(|v| v.as_str()).unwrap_or(""),
+            "pictures": profile.pointer("/paths/pictures").and_then(|v| v.as_str()).unwrap_or(""),
+            "documents": profile.pointer("/paths/documents").and_then(|v| v.as_str()).unwrap_or("")
+        },
+        "capabilities": {
+            "wallpaper_backends": wallpaper_backends,
+            "screenshot_backends": screenshot_backends,
+            "input_backends": input_backends,
+            "ocr_available": profile.pointer("/capabilities/ocr_available").and_then(|v| v.as_bool()).unwrap_or(false)
+        },
+        "editor": {
+            "vscode_command": vscode_command
+        },
+        "desktop_apps": {
+            "launcher_commands": launcher_commands,
+            "preferred_launchers": preferred_launchers
+        },
+        "projects": {
+            "known_roots": known_projects
+        },
+        "hyprland": {
+            "main_config": profile.pointer("/deep_scan/hyprland/main_config").and_then(|v| v.as_str()).unwrap_or(""),
+            "binds_sample": profile.pointer("/deep_scan/hyprland/binds_sample").cloned().unwrap_or_else(|| json!([])),
+            "exec_once_sample": profile.pointer("/deep_scan/hyprland/exec_once_sample").cloned().unwrap_or_else(|| json!([])),
+            "workspace_rules_sample": profile.pointer("/deep_scan/hyprland/workspace_rules_sample").cloned().unwrap_or_else(|| json!([]))
+        },
+        "packages": {
+            "pacman_explicit_count": profile.pointer("/deep_scan/packages/pacman_explicit_count").and_then(|v| v.as_u64()).unwrap_or(0),
+            "aur_count": profile.pointer("/deep_scan/packages/aur_count").and_then(|v| v.as_u64()).unwrap_or(0)
+        },
+        "commands": {
+            "available": available_commands
+        },
+        "usage": {
+            "top_commands": profile.pointer("/deep_scan/usage/shell_history_top").cloned().unwrap_or_else(|| json!([]))
+        }
+    })
+}
+
+fn build_preferred_launchers(
+    launcher_commands: &[String],
+    available_commands: &[String],
+    vscode_command: &str,
+) -> Value {
+    let mut known = std::collections::BTreeSet::new();
+    for command in launcher_commands {
+        known.insert(command.clone());
+    }
+    for command in available_commands {
+        known.insert(command.clone());
+    }
+
+    let pick = |candidates: &[&str]| -> String {
+        candidates
+            .iter()
+            .find(|candidate| known.contains(**candidate))
+            .map(|candidate| (*candidate).to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    };
+
+    let vscode = if vscode_command == "unknown" {
+        pick(&["code", "code-insiders", "code-oss", "codium", "vscodium"])
+    } else {
+        vscode_command.to_string()
+    };
+
+    json!({
+        "vscode": vscode,
+        "browser": pick(&["firefox", "google-chrome-stable", "google-chrome", "chromium", "brave-browser"]),
+        "telegram": pick(&["telegram-desktop", "telegram", "org.telegram.desktop"]),
+        "terminal": pick(&["kitty", "alacritty", "wezterm", "gnome-terminal", "xterm"])
+    })
+}
+
+fn capability_registry_needs_refresh(registry: &Value, profile: &Value) -> bool {
+    if registry.pointer("/schema_version").is_none() {
+        return true;
+    }
+    if registry.pointer("/paths/downloads").is_none() {
+        return true;
+    }
+    if registry
+        .pointer("/capabilities/wallpaper_backends")
+        .is_none()
+    {
+        return true;
+    }
+    if registry
+        .pointer("/desktop_apps/preferred_launchers")
+        .is_none()
+    {
+        return true;
+    }
+
+    let profile_scanned_at = profile
+        .pointer("/scanned_at")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let registry_profile_scanned_at = registry
+        .pointer("/source_profile_scanned_at")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    if profile_scanned_at > registry_profile_scanned_at {
+        return true;
+    }
+
+    let profile_has_deep = profile.pointer("/deep_scan").is_some();
+    let registry_has_deep = registry
+        .pointer("/source_has_deep_scan")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    profile_has_deep && !registry_has_deep
+}
+
+fn load_capability_registry(user_id: &str) -> io::Result<Value> {
+    let path = capability_registry_file_path(user_id);
+    let raw = std::fs::read_to_string(path)?;
+    serde_json::from_str::<Value>(&raw)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+}
+
+fn save_capability_registry(user_id: &str, registry: &Value) -> io::Result<()> {
+    std::fs::create_dir_all("./data/capabilities")?;
+    let path = capability_registry_file_path(user_id);
+    let payload = serde_json::to_string_pretty(registry)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    std::fs::write(path, payload)
+}
+
+fn print_capability_registry_summary(user_id: &str, registry: &Value) {
+    let generated = registry
+        .pointer("/generated_at")
+        .and_then(|v| v.as_i64())
+        .map(format_timestamp)
+        .unwrap_or_else(|| "n/a".to_string());
+    let distro = registry
+        .pointer("/platform/distro_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let kernel = registry
+        .pointer("/platform/kernel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let workspace = registry
+        .pointer("/platform/active_workspace")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let downloads = registry
+        .pointer("/paths/downloads")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let wallpaper =
+        read_string_array_from_value(registry.pointer("/capabilities/wallpaper_backends"));
+    let screenshot =
+        read_string_array_from_value(registry.pointer("/capabilities/screenshot_backends"));
+    let input = read_string_array_from_value(registry.pointer("/capabilities/input_backends"));
+    let launchers =
+        read_string_array_from_value(registry.pointer("/desktop_apps/launcher_commands"));
+    let preferred_launchers = registry
+        .pointer("/desktop_apps/preferred_launchers")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|value| format!("{k}={value}")))
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default();
+    let registry_path = capability_registry_file_path(user_id);
+
+    println!("\n{}", ui_title("Capability Registry"));
+    println!("  file         : {}", ui_dim(&registry_path));
+    println!("  generated_at : {}", generated);
+    println!(
+        "  platform     : {} | kernel {} | workspace {}",
+        distro, kernel, workspace
+    );
+    println!("  downloads    : {}", downloads);
+    println!(
+        "  backends     : wallpaper=[{}] screenshot=[{}] input=[{}]",
+        wallpaper.join(", "),
+        screenshot.join(", "),
+        input.join(", ")
+    );
+    println!(
+        "  launcher cmds: {}",
+        truncate_for_table(&launchers.join(", "), 92)
+    );
+    println!(
+        "  preferred    : {}",
+        truncate_for_table(&preferred_launchers.join(", "), 92)
+    );
+    println!();
+}
+
+fn capability_registry_diff_lines(old_registry: &Value, new_registry: &Value) -> Vec<String> {
+    let old_distro = old_registry
+        .pointer("/platform/distro_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let new_distro = new_registry
+        .pointer("/platform/distro_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let old_kernel = old_registry
+        .pointer("/platform/kernel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let new_kernel = new_registry
+        .pointer("/platform/kernel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let old_workspace = old_registry
+        .pointer("/platform/active_workspace")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let new_workspace = new_registry
+        .pointer("/platform/active_workspace")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let old_wallpaper =
+        read_string_array_from_value(old_registry.pointer("/capabilities/wallpaper_backends"));
+    let new_wallpaper =
+        read_string_array_from_value(new_registry.pointer("/capabilities/wallpaper_backends"));
+    let old_screenshot =
+        read_string_array_from_value(old_registry.pointer("/capabilities/screenshot_backends"));
+    let new_screenshot =
+        read_string_array_from_value(new_registry.pointer("/capabilities/screenshot_backends"));
+    let old_input =
+        read_string_array_from_value(old_registry.pointer("/capabilities/input_backends"));
+    let new_input =
+        read_string_array_from_value(new_registry.pointer("/capabilities/input_backends"));
+
+    let old_launchers =
+        read_string_array_from_value(old_registry.pointer("/desktop_apps/launcher_commands"));
+    let new_launchers =
+        read_string_array_from_value(new_registry.pointer("/desktop_apps/launcher_commands"));
+    let old_projects = read_string_array_from_value(old_registry.pointer("/projects/known_roots"));
+    let new_projects = read_string_array_from_value(new_registry.pointer("/projects/known_roots"));
+    let old_vscode = old_registry
+        .pointer("/editor/vscode_command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("none");
+    let new_vscode = new_registry
+        .pointer("/editor/vscode_command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("none");
+
+    let mut changes = Vec::<String>::new();
+    if old_distro != new_distro {
+        changes.push(format!(
+            "platform distro: '{}' -> '{}'",
+            old_distro, new_distro
+        ));
+    }
+    if old_kernel != new_kernel {
+        changes.push(format!(
+            "platform kernel: '{}' -> '{}'",
+            old_kernel, new_kernel
+        ));
+    }
+    if old_workspace != new_workspace {
+        changes.push(format!(
+            "active workspace: {} -> {}",
+            old_workspace, new_workspace
+        ));
+    }
+    if old_wallpaper != new_wallpaper {
+        changes.push(format!(
+            "wallpaper backends: [{}] -> [{}]",
+            old_wallpaper.join(", "),
+            new_wallpaper.join(", ")
+        ));
+    }
+    if old_screenshot != new_screenshot {
+        changes.push(format!(
+            "screenshot backends: [{}] -> [{}]",
+            old_screenshot.join(", "),
+            new_screenshot.join(", ")
+        ));
+    }
+    if old_input != new_input {
+        changes.push(format!(
+            "input backends: [{}] -> [{}]",
+            old_input.join(", "),
+            new_input.join(", ")
+        ));
+    }
+    if old_launchers != new_launchers {
+        changes.push(format!(
+            "launcher commands changed ({} -> {} entries)",
+            old_launchers.len(),
+            new_launchers.len()
+        ));
+    }
+    if old_projects != new_projects {
+        changes.push(format!(
+            "known project roots changed ({} -> {} entries)",
+            old_projects.len(),
+            new_projects.len()
+        ));
+    }
+    if old_vscode != new_vscode {
+        changes.push(format!(
+            "vscode command: '{}' -> '{}'",
+            old_vscode, new_vscode
+        ));
+    }
+
+    changes
+}
+
+fn print_capability_registry_diff_summary(old_registry: &Value, new_registry: &Value) {
+    let changes = capability_registry_diff_lines(old_registry, new_registry);
+    println!("\n{}", ui_title("Scan Diff Summary"));
+    if changes.is_empty() {
+        println!("  no major capability changes detected");
+    } else {
+        for change in changes {
+            println!("  - {}", truncate_for_table(&change, 104));
+        }
+    }
+    println!();
 }
 
 async fn collect_system_profile(user_id: &str) -> Value {
@@ -3581,6 +5725,141 @@ fn classify_supervised_task_class(input: &str) -> SupervisedTaskClass {
     SupervisedTaskClass::Question
 }
 
+fn infer_supervised_task_resources(input: &str) -> Vec<String> {
+    let lower = input.to_lowercase();
+    let mut resources = Vec::<String>::new();
+
+    let add = |name: &str, resources: &mut Vec<String>| {
+        if !resources.iter().any(|existing| existing == name) {
+            resources.push(name.to_string());
+        }
+    };
+
+    if [
+        "open",
+        "launch",
+        "switch workspace",
+        "workspace",
+        "window",
+        "click",
+        "type",
+        "press",
+        "key",
+        "mouse",
+        "screen",
+        "ocr",
+        "telegram",
+        "gmail",
+        "mail",
+        "browser",
+    ]
+    .iter()
+    .any(|token| lower.contains(token))
+    {
+        add("desktop_input", &mut resources);
+    }
+
+    if [
+        "file", "folder", "dir", "read", "write", "create", "delete", "copy", "move", "project",
+    ]
+    .iter()
+    .any(|token| lower.contains(token))
+    {
+        add("filesystem", &mut resources);
+    }
+
+    if [
+        "web", "search", "download", "upload", "api", "http", "gmail", "telegram",
+    ]
+    .iter()
+    .any(|token| lower.contains(token))
+    {
+        add("network", &mut resources);
+    }
+
+    if [
+        "run",
+        "build",
+        "compile",
+        "install",
+        "process",
+        "spawn",
+        "kill",
+        "benchmark",
+        "test",
+    ]
+    .iter()
+    .any(|token| lower.contains(token))
+    {
+        add("compute", &mut resources);
+    }
+
+    if resources.is_empty() {
+        add("general", &mut resources);
+    }
+
+    resources
+}
+
+fn can_run_supervisor_in_background(task: &SupervisedTask) -> bool {
+    !task.resources.iter().any(|resource| {
+        matches!(
+            resource.as_str(),
+            "desktop_input" | "filesystem" | "general"
+        )
+    })
+}
+
+fn resource_is_shared(resource: &str) -> bool {
+    matches!(resource, "network" | "compute")
+}
+
+fn resource_conflicts(lhs: &[String], rhs: &[String]) -> Vec<String> {
+    let left = lhs
+        .iter()
+        .map(|r| r.trim().to_lowercase())
+        .filter(|r| !r.is_empty())
+        .collect::<HashSet<_>>();
+    let right = rhs
+        .iter()
+        .map(|r| r.trim().to_lowercase())
+        .filter(|r| !r.is_empty())
+        .collect::<HashSet<_>>();
+
+    if left.is_empty() || right.is_empty() {
+        return Vec::new();
+    }
+    if left.contains("general") || right.contains("general") {
+        return vec!["general".to_string()];
+    }
+
+    let mut conflicts = BTreeSet::new();
+    for resource in left.intersection(&right) {
+        if !resource_is_shared(resource) {
+            conflicts.insert(resource.to_string());
+        }
+    }
+    conflicts.into_iter().collect::<Vec<_>>()
+}
+
+fn running_supervisor_conflicts_for_resources(
+    required: &[String],
+    running: &[(String, Vec<String>)],
+) -> Vec<String> {
+    let mut details = Vec::new();
+    for (task_id, resources) in running {
+        let overlap = resource_conflicts(required, resources);
+        if !overlap.is_empty() {
+            details.push(format!(
+                "{} [{}]",
+                task_id,
+                truncate_for_table(&overlap.join("+"), 28)
+            ));
+        }
+    }
+    details
+}
+
 fn execution_budget_for_class(class: &SupervisedTaskClass, mode: &AutonomyMode) -> ExecutionBudget {
     match mode {
         AutonomyMode::PromptFirst => match class {
@@ -3624,10 +5903,13 @@ fn start_supervised_task(
 ) -> String {
     let now = chrono::Utc::now().timestamp();
     let id = next_supervised_task_id(state);
+    let resources = infer_supervised_task_resources(&prompt);
     state.supervisor.tasks.push(SupervisedTask {
         id: id.clone(),
         prompt,
         class,
+        resources,
+        background_task_id: None,
         status: SupervisedTaskStatus::Running,
         created_at: now,
         updated_at: now,
@@ -3643,10 +5925,13 @@ fn enqueue_supervised_task(
 ) -> String {
     let now = chrono::Utc::now().timestamp();
     let id = next_supervised_task_id(state);
+    let resources = infer_supervised_task_resources(&prompt);
     state.supervisor.tasks.push(SupervisedTask {
         id: id.clone(),
         prompt,
         class,
+        resources,
+        background_task_id: None,
         status: SupervisedTaskStatus::Queued,
         created_at: now,
         updated_at: now,
@@ -3655,16 +5940,47 @@ fn enqueue_supervised_task(
     id
 }
 
-fn start_next_queued_supervised_task(state: &mut AgentOsState) -> Option<SupervisedTask> {
+enum QueueStartResult {
+    Started(SupervisedTask),
+    Blocked(String),
+    Empty,
+}
+
+fn start_next_queued_supervised_task(state: &mut AgentOsState) -> QueueStartResult {
+    let running = state
+        .supervisor
+        .tasks
+        .iter()
+        .filter(|task| task.status == SupervisedTaskStatus::Running)
+        .map(|task| (task.id.clone(), task.resources.clone()))
+        .collect::<Vec<_>>();
+
     let now = chrono::Utc::now().timestamp();
+    let mut blocked_reason: Option<String> = None;
     for task in state.supervisor.tasks.iter_mut() {
-        if task.status == SupervisedTaskStatus::Queued {
+        if task.status != SupervisedTaskStatus::Queued {
+            continue;
+        }
+        let conflicts = running_supervisor_conflicts_for_resources(&task.resources, &running);
+        if conflicts.is_empty() {
             task.status = SupervisedTaskStatus::Running;
             task.updated_at = now;
-            return Some(task.clone());
+            task.background_task_id = None;
+            return QueueStartResult::Started(task.clone());
+        }
+        if blocked_reason.is_none() {
+            blocked_reason = Some(format!(
+                "{} waiting on {} (conflict resources: {})",
+                task.id,
+                conflicts.join(", "),
+                truncate_for_table(&task.resources.join(","), 28)
+            ));
         }
     }
-    None
+    if let Some(reason) = blocked_reason {
+        return QueueStartResult::Blocked(reason);
+    }
+    QueueStartResult::Empty
 }
 
 fn mark_supervised_task_completed(state: &mut AgentOsState, task_id: &str) {
@@ -3678,6 +5994,7 @@ fn mark_supervised_task_completed(state: &mut AgentOsState, task_id: &str) {
         task.status = SupervisedTaskStatus::Completed;
         task.updated_at = now;
         task.error = None;
+        task.background_task_id = None;
     }
 }
 
@@ -3692,6 +6009,47 @@ fn mark_supervised_task_failed(state: &mut AgentOsState, task_id: &str, error: S
         task.status = SupervisedTaskStatus::Failed;
         task.updated_at = now;
         task.error = Some(error);
+        task.background_task_id = None;
+    }
+}
+
+fn mark_supervised_task_cancelled(state: &mut AgentOsState, task_id: &str, reason: Option<String>) {
+    let now = chrono::Utc::now().timestamp();
+    if let Some(task) = state
+        .supervisor
+        .tasks
+        .iter_mut()
+        .find(|task| task.id == task_id)
+    {
+        task.status = SupervisedTaskStatus::Cancelled;
+        task.updated_at = now;
+        task.error = reason;
+        task.background_task_id = None;
+    }
+}
+
+fn supervised_task_status(state: &AgentOsState, task_id: &str) -> Option<SupervisedTaskStatus> {
+    state
+        .supervisor
+        .tasks
+        .iter()
+        .find(|task| task.id == task_id)
+        .map(|task| task.status.clone())
+}
+
+fn set_supervised_task_background_id(
+    state: &mut AgentOsState,
+    task_id: &str,
+    background_task_id: Option<String>,
+) {
+    if let Some(task) = state
+        .supervisor
+        .tasks
+        .iter_mut()
+        .find(|task| task.id == task_id)
+    {
+        task.background_task_id = background_task_id;
+        task.updated_at = chrono::Utc::now().timestamp();
     }
 }
 
@@ -3702,14 +6060,75 @@ fn cancel_queued_supervised_tasks(state: &mut AgentOsState) -> usize {
         if task.status == SupervisedTaskStatus::Queued {
             task.status = SupervisedTaskStatus::Cancelled;
             task.updated_at = now;
+            task.background_task_id = None;
             changed += 1;
         }
     }
     changed
 }
 
+fn prune_supervisor_tasks(state: &mut AgentOsState, keep_terminal: usize) -> usize {
+    let mut terminal = state
+        .supervisor
+        .tasks
+        .iter()
+        .filter(|task| {
+            matches!(
+                task.status,
+                SupervisedTaskStatus::Completed
+                    | SupervisedTaskStatus::Failed
+                    | SupervisedTaskStatus::Cancelled
+            )
+        })
+        .map(|task| (task.id.clone(), task.updated_at))
+        .collect::<Vec<_>>();
+
+    if terminal.len() <= keep_terminal {
+        return 0;
+    }
+
+    terminal.sort_by(|a, b| b.1.cmp(&a.1));
+    let keep_ids = terminal
+        .into_iter()
+        .take(keep_terminal)
+        .map(|(id, _)| id)
+        .collect::<HashSet<_>>();
+
+    let before = state.supervisor.tasks.len();
+    state.supervisor.tasks.retain(|task| {
+        if matches!(
+            task.status,
+            SupervisedTaskStatus::Queued | SupervisedTaskStatus::Running
+        ) {
+            true
+        } else {
+            keep_ids.contains(&task.id)
+        }
+    });
+    before.saturating_sub(state.supervisor.tasks.len())
+}
+
+fn reconcile_supervisor_after_restart(state: &mut AgentOsState) -> usize {
+    let now = chrono::Utc::now().timestamp();
+    let mut recovered = 0usize;
+    for task in state.supervisor.tasks.iter_mut() {
+        if task.status == SupervisedTaskStatus::Running {
+            task.status = SupervisedTaskStatus::Failed;
+            task.updated_at = now;
+            task.background_task_id = None;
+            task.error =
+                Some("Recovered after restart: previous run did not finish cleanly".to_string());
+            recovered += 1;
+        }
+    }
+    recovered
+}
+
 fn print_supervisor_queue(state: &AgentOsState) {
     println!("\n🧰 Supervisor Queue");
+    println!(
+        "  actions: queue status | queue prune [N] | queue stop <id>|all | queue retry <id>|failed|completed|all"
+    );
     println!(
         "  auto-run: {}",
         if state.supervisor.auto_run {
@@ -3727,11 +6146,14 @@ fn print_supervisor_queue(state: &AgentOsState) {
     let mut tasks = state.supervisor.tasks.clone();
     tasks.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     for task in tasks.iter().take(20) {
+        let bg = task.background_task_id.as_deref().unwrap_or("-");
         println!(
-            "  {:<8} {:<13} {:<14} {}",
+            "  {:<8} {:<13} {:<14} {:<14} {:<12} {}",
             truncate_for_table(&task.id, 8),
             format!("{:?}", task.status).to_lowercase(),
             task.class.as_str(),
+            truncate_for_table(&task.resources.join(","), 14),
+            truncate_for_table(bg, 12),
             truncate_for_table(&task.prompt, 52)
         );
     }
@@ -3741,38 +6163,128 @@ fn print_supervisor_queue(state: &AgentOsState) {
     println!();
 }
 
-fn requires_desktop_exclusive(input: &str) -> bool {
-    let lower = input.to_lowercase();
-    [
-        "open",
-        "click",
-        "type",
-        "press",
-        "workspace",
-        "switch",
-        "focus",
-        "telegram",
-        "gmail",
-        "browser",
-        "screen",
-        "ocr",
-        "wallpaper",
-        "music",
-        "volume",
-        "lockscreen",
-    ]
-    .iter()
-    .any(|token| lower.contains(token))
+fn print_supervisor_queue_status(state: &AgentOsState) {
+    let queued = state
+        .supervisor
+        .tasks
+        .iter()
+        .filter(|task| task.status == SupervisedTaskStatus::Queued)
+        .count();
+    let running = state
+        .supervisor
+        .tasks
+        .iter()
+        .filter(|task| task.status == SupervisedTaskStatus::Running)
+        .count();
+    let completed = state
+        .supervisor
+        .tasks
+        .iter()
+        .filter(|task| task.status == SupervisedTaskStatus::Completed)
+        .count();
+    let failed = state
+        .supervisor
+        .tasks
+        .iter()
+        .filter(|task| task.status == SupervisedTaskStatus::Failed)
+        .count();
+    let cancelled = state
+        .supervisor
+        .tasks
+        .iter()
+        .filter(|task| task.status == SupervisedTaskStatus::Cancelled)
+        .count();
+
+    println!("\n📌 Supervisor Queue Status");
+    println!(
+        "  auto-run: {} | queued={} running={} done={} failed={} cancelled={}",
+        if state.supervisor.auto_run {
+            "on"
+        } else {
+            "off"
+        },
+        queued,
+        running,
+        completed,
+        failed,
+        cancelled
+    );
+
+    let mut running_rows = state
+        .supervisor
+        .tasks
+        .iter()
+        .filter(|task| task.status == SupervisedTaskStatus::Running)
+        .cloned()
+        .collect::<Vec<_>>();
+    running_rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    if !running_rows.is_empty() {
+        println!("  running:");
+        for task in running_rows.iter().take(6) {
+            println!(
+                "    {} bg={} res={} prompt={}",
+                truncate_for_table(&task.id, 10),
+                truncate_for_table(task.background_task_id.as_deref().unwrap_or("-"), 14),
+                truncate_for_table(&task.resources.join(","), 16),
+                truncate_for_table(&task.prompt, 46)
+            );
+        }
+    }
+
+    let mut retry_rows = state
+        .supervisor
+        .tasks
+        .iter()
+        .filter(|task| {
+            matches!(
+                task.status,
+                SupervisedTaskStatus::Completed
+                    | SupervisedTaskStatus::Failed
+                    | SupervisedTaskStatus::Cancelled
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    retry_rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    if !retry_rows.is_empty() {
+        println!("  retry candidates:");
+        for task in retry_rows.iter().take(6) {
+            println!(
+                "    {} status={} class={} prompt={}",
+                truncate_for_table(&task.id, 10),
+                truncate_for_table(&format!("{:?}", task.status).to_lowercase(), 10),
+                truncate_for_table(task.class.as_str(), 12),
+                truncate_for_table(&task.prompt, 42)
+            );
+        }
+    }
+    println!();
 }
 
-fn has_running_background_conflict(
+fn running_background_conflict_reason(
     input: &str,
     running_tasks: &[hypr_claw_tasks::TaskInfo],
-) -> bool {
-    if !requires_desktop_exclusive(input) {
-        return false;
+) -> Option<String> {
+    let required = infer_supervised_task_resources(input);
+    let mut collisions = Vec::new();
+
+    for task in running_tasks {
+        let running_resources = infer_supervised_task_resources(&task.description);
+        let overlap = resource_conflicts(&required, &running_resources);
+        if !overlap.is_empty() {
+            collisions.push(format!("{} [{}]", task.id, overlap.join("+")));
+        }
     }
-    !running_tasks.is_empty()
+
+    if collisions.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "required [{}] conflicts with {}",
+            required.join(","),
+            collisions.join(", ")
+        ))
+    }
 }
 
 fn touch_active_thread(state: &mut AgentOsState) {
@@ -3810,105 +6322,118 @@ async fn switch_soul(
 fn augment_system_prompt_for_turn(
     base_prompt: &str,
     profile: &Value,
+    capability_registry: &Value,
     allowed_tools: &HashSet<String>,
     autonomy_mode: &AutonomyMode,
 ) -> String {
-    let distro = profile
-        .pointer("/platform/distro_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let kernel = profile
-        .pointer("/platform/kernel")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let workspace = profile
-        .pointer("/desktop/active_workspace")
+    let from_registry_str = |path: &str| -> Option<String> {
+        capability_registry
+            .pointer(path)
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+
+    let distro = from_registry_str("/platform/distro_name")
+        .or_else(|| {
+            profile
+                .pointer("/platform/distro_name")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    let kernel = from_registry_str("/platform/kernel")
+        .or_else(|| {
+            profile
+                .pointer("/platform/kernel")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    let workspace = capability_registry
+        .pointer("/platform/active_workspace")
         .and_then(|v| v.as_u64())
+        .or_else(|| {
+            profile
+                .pointer("/desktop/active_workspace")
+                .and_then(|v| v.as_u64())
+        })
         .unwrap_or(0);
 
-    let list_from_profile = |path: &str| -> String {
-        profile
-            .pointer(path)
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(str::to_string)
-                    .collect::<Vec<String>>()
-                    .join(", ")
-            })
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "none".to_string())
+    let list_from_registry = |primary_path: &str, fallback_path: &str| -> String {
+        let primary = read_string_array_from_value(capability_registry.pointer(primary_path));
+        if !primary.is_empty() {
+            return primary.join(", ");
+        }
+        let fallback = read_string_array_from_value(profile.pointer(fallback_path));
+        if fallback.is_empty() {
+            "none".to_string()
+        } else {
+            fallback.join(", ")
+        }
     };
 
-    let command_available = |name: &str| -> bool {
-        profile
-            .pointer(&format!("/commands/{name}"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-    };
-
-    let launcher_hints = profile
-        .pointer("/deep_scan/desktop_apps/launcher_commands_sample")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .map(str::to_string)
-                .take(40)
+    let launcher_hints = list_from_registry(
+        "/desktop_apps/launcher_commands",
+        "/deep_scan/desktop_apps/launcher_commands_sample",
+    );
+    let preferred_launchers = capability_registry
+        .pointer("/desktop_apps/preferred_launchers")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|value| format!("{k}={value}")))
                 .collect::<Vec<String>>()
                 .join(", ")
         })
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "none".to_string());
-
-    let vscode_hint = ["code", "codium", "code-oss", "vscodium", "code-insiders"]
-        .iter()
-        .find(|name| command_available(name))
-        .map(|s| (*s).to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let project_hints = profile
-        .pointer("/deep_scan/home_inventory/project_roots")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .take(20)
-                .collect::<Vec<&str>>()
-                .join(", ")
+    let project_hints = list_from_registry(
+        "/projects/known_roots",
+        "/deep_scan/home_inventory/project_roots",
+    );
+    let vscode_hint =
+        from_registry_str("/editor/vscode_command").unwrap_or_else(|| "none".to_string());
+    let registry_generated_at = capability_registry
+        .pointer("/generated_at")
+        .and_then(|v| v.as_i64())
+        .map(format_timestamp)
+        .unwrap_or_else(|| "n/a".to_string());
+    let downloads_dir = from_registry_str("/paths/downloads")
+        .or_else(|| {
+            profile
+                .pointer("/paths/downloads")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
         })
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "none".to_string());
+        .unwrap_or_default();
 
     let mut tools = allowed_tools.iter().cloned().collect::<Vec<String>>();
     tools.sort();
     let policy_block = match autonomy_mode {
         AutonomyMode::PromptFirst => {
-            "Execution policy:\n1) Perform actions using tools, not explanation.\n2) You control fallback order dynamically; adapt tool strategy from observed failures.\n3) Prefer one decisive tool call at a time with valid JSON input.\n4) Use runtime hints for app launch commands (launcher_commands/vscode_hint).\n5) End with concise result and what changed.\n6) Stop only when truly blocked after trying multiple tool paths."
+            "Execution policy:\n1) Perform actions using tools, not explanation.\n2) You control fallback order dynamically; adapt tool strategy from observed failures.\n3) Prefer one decisive tool call at a time with valid JSON input.\n4) For opening local apps, prefer desktop.launch_app before proc.spawn/open_url and use launcher_commands/vscode_hint.\n5) End with concise result and what changed.\n6) Stop only when truly blocked after trying multiple tool paths."
         }
         AutonomyMode::Guarded => {
-            "Execution policy:\n1) Perform actions using tools, not explanation.\n2) If a tool fails, choose an alternative backend/tool and continue.\n3) Use runtime hints for app launch commands (launcher_commands/vscode_hint).\n4) End with concise result and what changed.\n5) Only stop as blocked after trying alternatives available in runtime context."
+            "Execution policy:\n1) Perform actions using tools, not explanation.\n2) If a tool fails, choose an alternative backend/tool and continue.\n3) For opening local apps, try desktop.launch_app first, then proc.spawn as fallback; use launcher_commands/vscode_hint.\n4) End with concise result and what changed.\n5) Only stop as blocked after trying alternatives available in runtime context."
         }
     };
 
     format!(
-        "{}\n\nRuntime context:\n- autonomy_mode: {}\n- distro: {}\n- kernel: {}\n- active_workspace: {}\n- wallpaper_backends: {}\n- screenshot_backends: {}\n- input_backends: {}\n- vscode_hint: {}\n- launcher_commands: {}\n- known_projects: {}\n- known_downloads_dir: {}\n- allowed_tools_now: {}\n\n{}",
+        "{}\n\nRuntime context:\n- autonomy_mode: {}\n- capability_registry_generated_at: {}\n- distro: {}\n- kernel: {}\n- active_workspace: {}\n- wallpaper_backends: {}\n- screenshot_backends: {}\n- input_backends: {}\n- vscode_hint: {}\n- launcher_commands: {}\n- preferred_launchers: {}\n- known_projects: {}\n- known_downloads_dir: {}\n- allowed_tools_now: {}\n\n{}",
         base_prompt,
         autonomy_mode.as_str(),
+        registry_generated_at,
         distro,
         kernel,
         workspace,
-        list_from_profile("/capabilities/wallpaper_backends"),
-        list_from_profile("/capabilities/screenshot_backends"),
-        list_from_profile("/capabilities/input_backends"),
+        list_from_registry("/capabilities/wallpaper_backends", "/capabilities/wallpaper_backends"),
+        list_from_registry("/capabilities/screenshot_backends", "/capabilities/screenshot_backends"),
+        list_from_registry("/capabilities/input_backends", "/capabilities/input_backends"),
         vscode_hint,
         launcher_hints,
+        preferred_launchers,
         project_hints,
-        profile
-            .pointer("/paths/downloads")
-            .and_then(|v| v.as_str())
-            .unwrap_or(""),
+        downloads_dir,
         tools.join(", "),
         policy_block
     )
@@ -3960,10 +6485,18 @@ fn focused_tools_for_input(input: &str, allowed: &HashSet<String>) -> HashSet<St
         || lower.contains("gmail")
         || lower.contains("mail")
     {
-        add(&mut preferred, "desktop.open_url", allowed);
-        add(&mut preferred, "desktop.search_web", allowed);
         add(&mut preferred, "desktop.launch_app", allowed);
-        add(&mut preferred, "desktop.open_gmail", allowed);
+        if lower.contains("gmail") || lower.contains("mail") {
+            add(&mut preferred, "desktop.open_gmail", allowed);
+            add(&mut preferred, "desktop.open_url", allowed);
+            add(&mut preferred, "desktop.search_web", allowed);
+        } else if lower.contains("browser") || lower.contains("search") || lower.contains("web") {
+            add(&mut preferred, "desktop.search_web", allowed);
+            add(&mut preferred, "desktop.open_url", allowed);
+        } else {
+            add(&mut preferred, "desktop.open_url", allowed);
+            add(&mut preferred, "desktop.search_web", allowed);
+        }
     }
 
     if lower.contains("type")
@@ -4177,13 +6710,10 @@ fn auto_select_soul_id(input: &str, available_souls: &[String]) -> Option<String
             ["search", "browser", "web", "lookup"].as_slice(),
         ),
         (
-            "mail_assistant",
-            ["mail", "gmail", "email", "message"].as_slice(),
-        ),
-        (
             "communication_assistant",
             ["telegram", "whatsapp", "discord", "slack", "message"].as_slice(),
         ),
+        ("mail_assistant", ["mail", "gmail", "email"].as_slice()),
         (
             "project_manager",
             ["plan", "roadmap", "task list", "milestone"].as_slice(),
@@ -4454,6 +6984,12 @@ mod reliability_policy_tests {
             "STOP_PROVIDER_ARGUMENT"
         );
         assert_eq!(
+            stop_code_for_error(
+                "LLM error: Rate limit exceeded. Details: {\"status\":429,\"title\":\"Too Many Requests\"}"
+            ),
+            "STOP_PROVIDER_RATE_LIMIT"
+        );
+        assert_eq!(
             stop_code_for_error("Max iterations (16) reached after 16 tool calls"),
             "STOP_MAX_ITERATIONS"
         );
@@ -4479,6 +7015,13 @@ mod reliability_policy_tests {
             resolve_stop_code("Interrupted by user", MAX_RECOVERY_ATTEMPTS + 3),
             "STOP_USER_INTERRUPT"
         );
+    }
+
+    #[test]
+    fn retry_after_parser_supports_fractional_seconds() {
+        let err =
+            "Rate limit exceeded. Please retry in 18.932776315s. quotaId=GenerateRequestsPerMinute";
+        assert_eq!(extract_retry_after_seconds(err), Some(19));
     }
 
     #[test]
@@ -4512,5 +7055,394 @@ mod reliability_policy_tests {
             execution_budget_for_class(&SupervisedTaskClass::Question, &AutonomyMode::Guarded)
                 .max_iterations;
         assert!(q_prompt > q_guarded);
+    }
+
+    #[test]
+    fn autonomy_calibration_records_by_mode() {
+        let mut state = AgentOsState::default();
+        record_autonomy_outcome(
+            &mut state,
+            &AutonomyMode::PromptFirst,
+            true,
+            1200,
+            1,
+            "STOP_NONE",
+        );
+        record_autonomy_outcome(
+            &mut state,
+            &AutonomyMode::Guarded,
+            false,
+            900,
+            2,
+            "STOP_MAX_ITERATIONS",
+        );
+
+        assert_eq!(state.autonomy_calibration.prompt_first.runs, 1);
+        assert_eq!(state.autonomy_calibration.prompt_first.successes, 1);
+        assert_eq!(
+            *state
+                .autonomy_calibration
+                .prompt_first
+                .stop_codes
+                .get("STOP_NONE")
+                .unwrap_or(&0),
+            1
+        );
+
+        assert_eq!(state.autonomy_calibration.guarded.runs, 1);
+        assert_eq!(state.autonomy_calibration.guarded.failures, 1);
+        assert_eq!(
+            *state
+                .autonomy_calibration
+                .guarded
+                .stop_codes
+                .get("STOP_MAX_ITERATIONS")
+                .unwrap_or(&0),
+            1
+        );
+    }
+
+    #[test]
+    fn autonomy_mode_summary_formats_metrics() {
+        let mut metrics = AutonomyModeMetrics::default();
+        metrics.runs = 2;
+        metrics.successes = 1;
+        metrics.failures = 1;
+        metrics.total_duration_ms = 3000;
+        metrics.total_fallback_attempts = 3;
+        metrics.stop_codes.insert("STOP_NONE".to_string(), 1);
+
+        let line = autonomy_mode_summary("prompt_first", &metrics);
+        assert!(line.contains("prompt_first"));
+        assert!(line.contains("succ%=50.0"));
+        assert!(line.contains("avg_ms=1500"));
+    }
+
+    #[test]
+    fn capability_registry_path_is_sanitized() {
+        let path = capability_registry_file_path("rick@local host");
+        assert!(path.contains("rick_local_host"));
+        assert!(path.ends_with(".json"));
+    }
+
+    #[test]
+    fn capability_registry_refreshes_when_profile_is_newer() {
+        let profile = json!({
+            "scanned_at": 100,
+            "paths": { "downloads": "/home/rick/Downloads" },
+            "capabilities": { "wallpaper_backends": ["caelestia"] }
+        });
+        let registry = json!({
+            "schema_version": 1,
+            "source_profile_scanned_at": 90,
+            "paths": { "downloads": "/home/rick/Downloads" },
+            "capabilities": { "wallpaper_backends": ["caelestia"] },
+            "source_has_deep_scan": false
+        });
+        assert!(capability_registry_needs_refresh(&registry, &profile));
+    }
+
+    #[test]
+    fn capability_registry_diff_lines_report_key_changes() {
+        let old_registry = json!({
+            "platform": {
+                "distro_name": "Arch Linux",
+                "kernel": "6.18.1",
+                "active_workspace": 2
+            },
+            "capabilities": {
+                "wallpaper_backends": ["hyprpaper"],
+                "screenshot_backends": ["grim"],
+                "input_backends": ["wtype"]
+            },
+            "desktop_apps": {
+                "launcher_commands": ["firefox"]
+            },
+            "projects": {
+                "known_roots": ["/home/rick/hypr-claw"]
+            },
+            "editor": {
+                "vscode_command": "code"
+            }
+        });
+        let new_registry = json!({
+            "platform": {
+                "distro_name": "Arch Linux",
+                "kernel": "6.18.7",
+                "active_workspace": 4
+            },
+            "capabilities": {
+                "wallpaper_backends": ["caelestia"],
+                "screenshot_backends": ["grim", "grimblast"],
+                "input_backends": ["ydotool"]
+            },
+            "desktop_apps": {
+                "launcher_commands": ["firefox", "kitty"]
+            },
+            "projects": {
+                "known_roots": ["/home/rick/hypr-claw", "/home/rick/other"]
+            },
+            "editor": {
+                "vscode_command": "code-oss"
+            }
+        });
+
+        let lines = capability_registry_diff_lines(&old_registry, &new_registry);
+        assert!(lines.iter().any(|line| line.contains("platform kernel")));
+        assert!(lines.iter().any(|line| line.contains("active workspace")));
+        assert!(lines.iter().any(|line| line.contains("wallpaper backends")));
+        assert!(lines.iter().any(|line| line.contains("vscode command")));
+    }
+
+    #[test]
+    fn preferred_launchers_pick_known_commands() {
+        let launcher_commands = vec![
+            "firefox".to_string(),
+            "telegram-desktop".to_string(),
+            "kitty".to_string(),
+        ];
+        let available_commands = vec!["code-oss".to_string()];
+        let preferred =
+            build_preferred_launchers(&launcher_commands, &available_commands, "code-oss");
+
+        assert_eq!(
+            preferred.pointer("/vscode").and_then(|v| v.as_str()),
+            Some("code-oss")
+        );
+        assert_eq!(
+            preferred.pointer("/browser").and_then(|v| v.as_str()),
+            Some("firefox")
+        );
+        assert_eq!(
+            preferred.pointer("/telegram").and_then(|v| v.as_str()),
+            Some("telegram-desktop")
+        );
+        assert_eq!(
+            preferred.pointer("/terminal").and_then(|v| v.as_str()),
+            Some("kitty")
+        );
+    }
+
+    #[test]
+    fn inferred_resources_include_desktop_and_network() {
+        let resources = infer_supervised_task_resources("open telegram and summarize messages");
+        assert!(resources.iter().any(|r| r == "desktop_input"));
+        assert!(resources.iter().any(|r| r == "network"));
+    }
+
+    #[test]
+    fn shared_resources_do_not_conflict() {
+        let a = vec!["network".to_string()];
+        let b = vec!["network".to_string(), "compute".to_string()];
+        let conflicts = resource_conflicts(&a, &b);
+        assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn running_background_conflict_reason_reports_overlap() {
+        let now = chrono::Utc::now().timestamp();
+        let running = vec![hypr_claw_tasks::TaskInfo {
+            id: "bg-99".to_string(),
+            description: "open browser and click login".to_string(),
+            status: hypr_claw_tasks::TaskStatus::Running,
+            progress: 0.3,
+            created_at: now - 10,
+            updated_at: now - 2,
+            result: None,
+            error: None,
+        }];
+
+        let reason = running_background_conflict_reason("open gmail and reply", &running)
+            .unwrap_or_default();
+        assert!(reason.contains("bg-99"));
+        assert!(reason.contains("desktop_input"));
+    }
+
+    #[test]
+    fn queue_start_is_blocked_when_another_task_is_running() {
+        let mut state = AgentOsState::default();
+        start_supervised_task(
+            &mut state,
+            "open firefox".to_string(),
+            SupervisedTaskClass::Action,
+        );
+        enqueue_supervised_task(
+            &mut state,
+            "open telegram".to_string(),
+            SupervisedTaskClass::Action,
+        );
+        match start_next_queued_supervised_task(&mut state) {
+            QueueStartResult::Blocked(_) => {}
+            _ => panic!("expected queue start to be blocked by running task"),
+        }
+    }
+
+    #[test]
+    fn queue_start_allows_non_conflicting_resources() {
+        let mut state = AgentOsState::default();
+        start_supervised_task(
+            &mut state,
+            "open firefox".to_string(),
+            SupervisedTaskClass::Action,
+        );
+        enqueue_supervised_task(
+            &mut state,
+            "search web api docs".to_string(),
+            SupervisedTaskClass::Action,
+        );
+        match start_next_queued_supervised_task(&mut state) {
+            QueueStartResult::Started(task) => {
+                assert_eq!(task.status, SupervisedTaskStatus::Running);
+                assert!(task.resources.iter().any(|r| r == "network"));
+            }
+            QueueStartResult::Blocked(reason) => {
+                panic!(
+                    "expected non-conflicting task to start, got blocked: {}",
+                    reason
+                )
+            }
+            QueueStartResult::Empty => panic!("expected queued task to start"),
+        }
+    }
+
+    #[test]
+    fn mark_cancelled_clears_background_link() {
+        let mut state = AgentOsState::default();
+        let task_id = start_supervised_task(
+            &mut state,
+            "search docs".to_string(),
+            SupervisedTaskClass::Action,
+        );
+        set_supervised_task_background_id(&mut state, &task_id, Some("supbg-1".to_string()));
+        mark_supervised_task_cancelled(&mut state, &task_id, Some("Cancelled by test".to_string()));
+        let task = state
+            .supervisor
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .expect("task must exist");
+        assert_eq!(task.status, SupervisedTaskStatus::Cancelled);
+        assert!(task.background_task_id.is_none());
+    }
+
+    #[test]
+    fn prune_supervisor_tasks_keeps_running_and_latest_terminal() {
+        let now = chrono::Utc::now().timestamp();
+        let mut state = AgentOsState::default();
+        state.supervisor.tasks = vec![
+            SupervisedTask {
+                id: "sup-run".to_string(),
+                prompt: "running".to_string(),
+                class: SupervisedTaskClass::Action,
+                resources: vec!["network".to_string()],
+                background_task_id: Some("supbg-run".to_string()),
+                status: SupervisedTaskStatus::Running,
+                created_at: now - 50,
+                updated_at: now - 5,
+                error: None,
+            },
+            SupervisedTask {
+                id: "sup-old-1".to_string(),
+                prompt: "old1".to_string(),
+                class: SupervisedTaskClass::Action,
+                resources: vec!["general".to_string()],
+                background_task_id: None,
+                status: SupervisedTaskStatus::Completed,
+                created_at: now - 100,
+                updated_at: now - 100,
+                error: None,
+            },
+            SupervisedTask {
+                id: "sup-old-2".to_string(),
+                prompt: "old2".to_string(),
+                class: SupervisedTaskClass::Action,
+                resources: vec!["general".to_string()],
+                background_task_id: None,
+                status: SupervisedTaskStatus::Failed,
+                created_at: now - 90,
+                updated_at: now - 90,
+                error: Some("x".to_string()),
+            },
+            SupervisedTask {
+                id: "sup-new".to_string(),
+                prompt: "new".to_string(),
+                class: SupervisedTaskClass::Action,
+                resources: vec!["general".to_string()],
+                background_task_id: None,
+                status: SupervisedTaskStatus::Cancelled,
+                created_at: now - 10,
+                updated_at: now - 1,
+                error: Some("y".to_string()),
+            },
+        ];
+
+        let removed = prune_supervisor_tasks(&mut state, 1);
+        assert_eq!(removed, 2);
+        assert!(state.supervisor.tasks.iter().any(|t| t.id == "sup-run"));
+        assert!(state.supervisor.tasks.iter().any(|t| t.id == "sup-new"));
+        assert!(!state.supervisor.tasks.iter().any(|t| t.id == "sup-old-1"));
+        assert!(!state.supervisor.tasks.iter().any(|t| t.id == "sup-old-2"));
+    }
+
+    #[test]
+    fn reconcile_marks_stale_running_tasks_as_failed() {
+        let mut state = AgentOsState::default();
+        start_supervised_task(
+            &mut state,
+            "open firefox".to_string(),
+            SupervisedTaskClass::Action,
+        );
+        let recovered = reconcile_supervisor_after_restart(&mut state);
+        assert_eq!(recovered, 1);
+        assert!(state
+            .supervisor
+            .tasks
+            .iter()
+            .any(|t| t.status == SupervisedTaskStatus::Failed));
+    }
+
+    #[test]
+    fn tail_window_slice_paginates_from_latest() {
+        let rows: Vec<u32> = (1..=12).collect();
+        let (latest, start, end, total) = tail_window_slice(&rows, 0, 5);
+        assert_eq!(latest, vec![8, 9, 10, 11, 12]);
+        assert_eq!((start, end, total), (8, 12, 12));
+
+        let (older, start, end, total) = tail_window_slice(&rows, 5, 5);
+        assert_eq!(older, vec![3, 4, 5, 6, 7]);
+        assert_eq!((start, end, total), (3, 7, 12));
+    }
+
+    #[test]
+    fn task_log_lines_include_background_and_supervisor_entries() {
+        let now = chrono::Utc::now().timestamp();
+        let bg_tasks = vec![hypr_claw_tasks::TaskInfo {
+            id: "bg-1".to_string(),
+            description: "compile project".to_string(),
+            status: hypr_claw_tasks::TaskStatus::Completed,
+            progress: 1.0,
+            created_at: now - 5,
+            updated_at: now - 2,
+            result: Some("done".to_string()),
+            error: None,
+        }];
+
+        let mut state = AgentOsState::default();
+        state.supervisor.tasks.push(SupervisedTask {
+            id: "sup-1".to_string(),
+            prompt: "open firefox".to_string(),
+            class: SupervisedTaskClass::Action,
+            resources: vec!["desktop_input".to_string()],
+            background_task_id: None,
+            status: SupervisedTaskStatus::Failed,
+            created_at: now - 4,
+            updated_at: now - 1,
+            error: Some("missing binary".to_string()),
+        });
+
+        let task_event_feed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines = build_task_log_lines(&bg_tasks, &state, &task_event_feed);
+        assert!(lines.iter().any(|line| line.contains("bg bg-1")));
+        assert!(lines.iter().any(|line| line.contains("sup sup-1")));
     }
 }

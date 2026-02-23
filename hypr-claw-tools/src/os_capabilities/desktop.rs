@@ -2,6 +2,9 @@
 
 use super::{OsError, OsResult};
 use serde_json::Value;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
 
@@ -11,7 +14,7 @@ fn validate_app_name(app: &str) -> OsResult<()> {
     }
     if !app
         .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ' '))
     {
         return Err(OsError::InvalidArgument(
             "app contains invalid characters".to_string(),
@@ -121,15 +124,395 @@ async fn run_output(command: &str, args: &[&str]) -> OsResult<String> {
     ))
 }
 
+#[derive(Clone, Debug)]
+struct DesktopEntryHint {
+    desktop_id: String,
+    name: String,
+    exec_program: Option<String>,
+    flatpak_app_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+enum LaunchTarget {
+    Command { program: String, args: Vec<String> },
+    Flatpak { app_id: String, args: Vec<String> },
+    GtkLaunch { desktop_id: String },
+}
+
+impl LaunchTarget {
+    fn key(&self) -> String {
+        match self {
+            Self::Command { program, args } => format!("cmd:{program}:{}", args.join("\x1f")),
+            Self::Flatpak { app_id, args } => format!("flatpak:{app_id}:{}", args.join("\x1f")),
+            Self::GtkLaunch { desktop_id } => format!("gtk:{desktop_id}"),
+        }
+    }
+}
+
+fn canonical_app_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn is_likely_flatpak_id(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.contains('.') && !trimmed.contains('/') && !trimmed.ends_with(".desktop")
+}
+
+fn parse_exec_tokens(exec: &str) -> Vec<String> {
+    exec.split_whitespace()
+        .map(|part| part.trim_matches('"').trim_matches('\'').to_string())
+        .filter(|part| !part.is_empty())
+        .filter(|part| !part.starts_with('%'))
+        .collect()
+}
+
+fn parse_exec_program_and_flatpak(exec: &str) -> (Option<String>, Option<String>) {
+    let tokens = parse_exec_tokens(exec);
+    if tokens.is_empty() {
+        return (None, None);
+    }
+
+    let mut idx = 0usize;
+    if tokens[idx] == "env" {
+        idx += 1;
+        while idx < tokens.len() && tokens[idx].contains('=') {
+            idx += 1;
+        }
+    }
+    if idx >= tokens.len() {
+        return (None, None);
+    }
+
+    let program = Some(tokens[idx].clone());
+    let flatpak_id = if tokens.get(idx).map(String::as_str) == Some("flatpak")
+        && tokens.get(idx + 1).map(String::as_str) == Some("run")
+    {
+        tokens.get(idx + 2).cloned()
+    } else {
+        None
+    };
+    (program, flatpak_id)
+}
+
+fn desktop_entry_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![
+        PathBuf::from("/usr/share/applications"),
+        PathBuf::from("/var/lib/flatpak/exports/share/applications"),
+    ];
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(PathBuf::from(&home).join(".local/share/applications"));
+        dirs.push(PathBuf::from(&home).join(".local/share/flatpak/exports/share/applications"));
+    }
+    dirs
+}
+
+fn parse_desktop_entry(file: &Path) -> Option<DesktopEntryHint> {
+    let content = std::fs::read_to_string(file).ok()?;
+    let mut name = None::<String>;
+    let mut exec = None::<String>;
+    for line in content.lines().map(str::trim) {
+        if line.starts_with("Name=") && name.is_none() {
+            name = Some(line.trim_start_matches("Name=").to_string());
+            continue;
+        }
+        if line.starts_with("Exec=") && exec.is_none() {
+            exec = Some(line.trim_start_matches("Exec=").to_string());
+            continue;
+        }
+        if line == "NoDisplay=true" {
+            return None;
+        }
+        if name.is_some() && exec.is_some() {
+            break;
+        }
+    }
+
+    let desktop_id = file
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default()
+        .to_string();
+    if desktop_id.is_empty() {
+        return None;
+    }
+
+    let exec = exec?;
+    let (exec_program, flatpak_app_id) = parse_exec_program_and_flatpak(&exec);
+    Some(DesktopEntryHint {
+        desktop_id,
+        name: name.unwrap_or_default(),
+        exec_program,
+        flatpak_app_id,
+    })
+}
+
+fn load_desktop_entry_hints(limit: usize) -> Vec<DesktopEntryHint> {
+    let mut files = Vec::<PathBuf>::new();
+    for dir in desktop_entry_dirs() {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|v| v.to_str()) == Some("desktop") {
+                    files.push(path);
+                }
+            }
+        }
+    }
+    files.sort();
+    files.truncate(limit);
+
+    let mut hints = files
+        .into_iter()
+        .filter_map(|file| parse_desktop_entry(&file))
+        .collect::<Vec<_>>();
+    hints.sort_by(|a, b| a.name.cmp(&b.name));
+    hints
+}
+
+fn desktop_entry_hints() -> &'static [DesktopEntryHint] {
+    static CACHE: OnceLock<Vec<DesktopEntryHint>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| load_desktop_entry_hints(900))
+        .as_slice()
+}
+
+fn match_desktop_hints(app: &str, limit: usize) -> Vec<DesktopEntryHint> {
+    let query = canonical_app_key(app);
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    let mut scored = Vec::<(usize, DesktopEntryHint)>::new();
+    for hint in desktop_entry_hints().iter().cloned() {
+        let id = canonical_app_key(&hint.desktop_id);
+        let name = canonical_app_key(&hint.name);
+        let exec = hint
+            .exec_program
+            .as_deref()
+            .map(canonical_app_key)
+            .unwrap_or_default();
+
+        let score = if id == query || name == query || exec == query {
+            4
+        } else if id.contains(&query) || name.contains(&query) || exec.contains(&query) {
+            3
+        } else if query.contains(&id) || query.contains(&name) || query.contains(&exec) {
+            2
+        } else {
+            0
+        };
+        if score > 0 {
+            scored.push((score, hint));
+        }
+    }
+    scored.sort_by(|(sa, a), (sb, b)| sb.cmp(sa).then_with(|| a.name.cmp(&b.name)));
+    scored
+        .into_iter()
+        .map(|(_, hint)| hint)
+        .take(limit)
+        .collect()
+}
+
+fn alias_candidates(app: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let key = canonical_app_key(app);
+
+    let mut push = |value: &str| {
+        let value = value.trim();
+        if value.is_empty() {
+            return;
+        }
+        if !out.iter().any(|existing| existing == value) {
+            out.push(value.to_string());
+        }
+    };
+
+    push(app);
+    match key.as_str() {
+        "vscode" | "visualstudiocode" | "code" | "codeoss" | "codium" | "vscodium" => {
+            for c in [
+                "code",
+                "code-insiders",
+                "code-oss",
+                "codium",
+                "vscodium",
+                "com.visualstudio.code",
+                "com.vscodium.codium",
+            ] {
+                push(c);
+            }
+        }
+        "telegram" | "telegramdesktop" => {
+            for c in ["telegram-desktop", "telegram", "org.telegram.desktop"] {
+                push(c);
+            }
+        }
+        "firefox" => push("firefox"),
+        "chrome" | "googlechrome" => {
+            for c in ["google-chrome-stable", "google-chrome", "chromium"] {
+                push(c);
+            }
+        }
+        "brave" | "bravebrowser" => push("brave-browser"),
+        "kitty" => push("kitty"),
+        "alacritty" => push("alacritty"),
+        "wezterm" => push("wezterm"),
+        _ => {}
+    }
+
+    out
+}
+
+fn push_target_unique(
+    targets: &mut Vec<LaunchTarget>,
+    seen: &mut HashSet<String>,
+    target: LaunchTarget,
+) {
+    if seen.insert(target.key()) {
+        targets.push(target);
+    }
+}
+
+fn build_launch_targets(app: &str, args: &[String]) -> Vec<LaunchTarget> {
+    let mut targets = Vec::<LaunchTarget>::new();
+    let mut seen = HashSet::<String>::new();
+
+    for candidate in alias_candidates(app) {
+        if candidate.ends_with(".desktop") {
+            let id = candidate.trim_end_matches(".desktop").to_string();
+            push_target_unique(
+                &mut targets,
+                &mut seen,
+                LaunchTarget::GtkLaunch { desktop_id: id },
+            );
+        }
+        if is_likely_flatpak_id(&candidate) {
+            push_target_unique(
+                &mut targets,
+                &mut seen,
+                LaunchTarget::Flatpak {
+                    app_id: candidate.clone(),
+                    args: args.to_vec(),
+                },
+            );
+        }
+        push_target_unique(
+            &mut targets,
+            &mut seen,
+            LaunchTarget::Command {
+                program: candidate,
+                args: args.to_vec(),
+            },
+        );
+    }
+
+    for hint in match_desktop_hints(app, 24) {
+        push_target_unique(
+            &mut targets,
+            &mut seen,
+            LaunchTarget::GtkLaunch {
+                desktop_id: hint.desktop_id.clone(),
+            },
+        );
+        if let Some(program) = hint.exec_program {
+            push_target_unique(
+                &mut targets,
+                &mut seen,
+                LaunchTarget::Command {
+                    program,
+                    args: args.to_vec(),
+                },
+            );
+        }
+        if let Some(app_id) = hint.flatpak_app_id {
+            push_target_unique(
+                &mut targets,
+                &mut seen,
+                LaunchTarget::Flatpak {
+                    app_id,
+                    args: args.to_vec(),
+                },
+            );
+        }
+    }
+
+    targets
+}
+
 /// Launch an app directly.
 pub async fn launch_app(app: &str, args: &[String]) -> OsResult<u32> {
     validate_app_name(app)?;
     for arg in args {
         validate_arg(arg)?;
     }
+    let targets = build_launch_targets(app.trim(), args);
+    if targets.is_empty() {
+        return Err(OsError::NotFound(format!(
+            "no launch candidates generated for app '{}'",
+            app
+        )));
+    }
 
-    let child = Command::new(app).args(args).spawn().map_err(OsError::Io)?;
-    Ok(child.id().unwrap_or_default())
+    let mut attempted = Vec::<String>::new();
+    for target in targets {
+        match target {
+            LaunchTarget::Command { program, args } => {
+                let display = if args.is_empty() {
+                    program.clone()
+                } else {
+                    format!("{} {}", program, args.join(" "))
+                };
+                if !command_exists(&program).await {
+                    attempted.push(format!("{display} (missing in PATH)"));
+                    continue;
+                }
+                match Command::new(&program)
+                    .args(args.iter().map(String::as_str))
+                    .spawn()
+                {
+                    Ok(child) => return Ok(child.id().unwrap_or_default()),
+                    Err(e) => {
+                        attempted.push(format!("{display} ({e})"));
+                    }
+                }
+            }
+            LaunchTarget::Flatpak { app_id, args } => {
+                if !command_exists("flatpak").await {
+                    attempted.push(format!("flatpak run {} (flatpak missing)", app_id));
+                    continue;
+                }
+                match Command::new("flatpak")
+                    .arg("run")
+                    .arg(&app_id)
+                    .args(args.iter().map(String::as_str))
+                    .spawn()
+                {
+                    Ok(child) => return Ok(child.id().unwrap_or_default()),
+                    Err(e) => attempted.push(format!("flatpak run {} ({})", app_id, e)),
+                }
+            }
+            LaunchTarget::GtkLaunch { desktop_id } => {
+                if !command_exists("gtk-launch").await {
+                    attempted.push(format!("gtk-launch {} (gtk-launch missing)", desktop_id));
+                    continue;
+                }
+                match Command::new("gtk-launch").arg(&desktop_id).spawn() {
+                    Ok(child) => return Ok(child.id().unwrap_or_default()),
+                    Err(e) => attempted.push(format!("gtk-launch {} ({})", desktop_id, e)),
+                }
+            }
+        }
+    }
+
+    Err(OsError::OperationFailed(format!(
+        "Unable to launch '{}'. Tried: {}",
+        app,
+        attempted.join(" | ")
+    )))
 }
 
 /// Open a URL with xdg-open.
@@ -460,4 +843,43 @@ pub async fn list_windows(limit: usize) -> OsResult<Vec<Value>> {
         json.truncate(limit);
     }
     Ok(json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_app_key_normalizes_common_forms() {
+        assert_eq!(canonical_app_key("Visual Studio Code"), "visualstudiocode");
+        assert_eq!(
+            canonical_app_key("org.telegram.desktop"),
+            "orgtelegramdesktop"
+        );
+    }
+
+    #[test]
+    fn parse_exec_program_supports_env_wrappers() {
+        let exec =
+            "env BAMF_DESKTOP_FILE_HINT=/var/lib/app.desktop /usr/bin/code --unity-launch %F";
+        let (program, flatpak) = parse_exec_program_and_flatpak(exec);
+        assert_eq!(program.as_deref(), Some("/usr/bin/code"));
+        assert!(flatpak.is_none());
+    }
+
+    #[test]
+    fn parse_exec_program_detects_flatpak_app_id() {
+        let exec = "flatpak run org.telegram.desktop -- %U";
+        let (program, flatpak) = parse_exec_program_and_flatpak(exec);
+        assert_eq!(program.as_deref(), Some("flatpak"));
+        assert_eq!(flatpak.as_deref(), Some("org.telegram.desktop"));
+    }
+
+    #[test]
+    fn alias_candidates_cover_vscode_family() {
+        let aliases = alias_candidates("vscode");
+        assert!(aliases.iter().any(|v| v == "code"));
+        assert!(aliases.iter().any(|v| v == "code-oss"));
+        assert!(aliases.iter().any(|v| v == "com.visualstudio.code"));
+    }
 }
