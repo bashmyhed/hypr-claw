@@ -3,6 +3,7 @@
 
 use async_trait::async_trait;
 use hypr_claw_runtime::*;
+use hypr_claw_runtime::LLMClientType;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -125,7 +126,7 @@ async fn test_parallel_different_sessions() {
     let lock_mgr = Arc::new(ThreadSafeLockManager::new());
     let dispatcher = Arc::new(MockToolDispatcher);
     let registry = Arc::new(MockToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:8000".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
     let compactor = Compactor::new(10000, MockSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -196,7 +197,7 @@ async fn test_sequential_same_session() {
     let lock_mgr = Arc::new(ThreadSafeLockManager::new());
     let dispatcher = Arc::new(MockToolDispatcher);
     let registry = Arc::new(MockToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:8000".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
     let compactor = Compactor::new(10000, MockSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -255,7 +256,7 @@ async fn test_lock_released_on_error() {
     let lock_mgr = Arc::new(ThreadSafeLockManager::new());
     let dispatcher = Arc::new(MockToolDispatcher);
     let registry = Arc::new(MockToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:8000".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
     let compactor = Compactor::new(10000, MockSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -304,7 +305,7 @@ async fn test_no_session_corruption() {
     let lock_mgr = Arc::new(ThreadSafeLockManager::new());
     let dispatcher = Arc::new(MockToolDispatcher);
     let registry = Arc::new(MockToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:8000".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
     let compactor = Compactor::new(10000, MockSummarizer);
 
     let agent_loop = AgentLoop::new(

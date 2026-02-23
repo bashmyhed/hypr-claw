@@ -13,7 +13,8 @@ pub fn run_bootstrap() -> Result<Config> {
     println!("3. Local model");
     println!("4. Antigravity (Claude + Gemini via Google OAuth)");
     println!("5. Gemini CLI (Gemini via Google OAuth)");
-    print!("\nChoice [1-5]: ");
+    println!("6. OpenAI Codex (ChatGPT Plus/Pro via OAuth)");
+    print!("\nChoice [1-6]: ");
     io::stdout().flush()?;
 
     let mut choice = String::new();
@@ -26,8 +27,9 @@ pub fn run_bootstrap() -> Result<Config> {
         "3" => bootstrap_local(),
         "4" => bootstrap_antigravity(),
         "5" => bootstrap_gemini_cli(),
+        "6" => bootstrap_codex(),
         _ => {
-            anyhow::bail!("Invalid choice. Please select 1-5.");
+            anyhow::bail!("Invalid choice. Please select 1-6.");
         }
     }
 }
@@ -231,4 +233,35 @@ fn bootstrap_gemini_cli() -> Result<Config> {
     println!("\nOr manually add accounts to: {}", accounts_path);
     
     anyhow::bail!("OAuth authentication required. Please run the OAuth flow first.");
+}
+
+fn bootstrap_codex() -> Result<Config> {
+    println!("\n🔐 OpenAI Codex OAuth Setup");
+    println!("This will authenticate with your ChatGPT Plus/Pro account.");
+    println!("You'll get access to GPT-5.x and Codex models.");
+    println!("\nPress Enter to continue...");
+    let mut _input = String::new();
+    io::stdin().read_line(&mut _input)?;
+
+    print!("\nEnter model [gpt-5.1-codex]: ");
+    io::stdout().flush()?;
+    let mut model = String::new();
+    io::stdin().read_line(&mut model)?;
+    let model = model.trim();
+    let model = if model.is_empty() {
+        "gpt-5.1-codex".to_string()
+    } else {
+        model.to_string()
+    };
+
+    let config = Config {
+        provider: LLMProvider::Codex,
+        model,
+    };
+
+    config.save()?;
+    println!("✅ Codex provider configured");
+    println!("💡 OAuth flow will run on first use");
+
+    Ok(config)
 }

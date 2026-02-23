@@ -61,6 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         LLMProvider::Local { .. } => "Local",
         LLMProvider::Antigravity => "Antigravity (Claude + Gemini)",
         LLMProvider::GeminiCli => "Gemini CLI",
+        LLMProvider::Codex => "OpenAI Codex (ChatGPT Plus/Pro)",
     };
     println!("Using provider: {}", provider_name);
     println!();
@@ -177,11 +178,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return Err(e.into());
                 }
             };
-            hypr_claw_runtime::LLMClient::with_api_key_and_model(
-                config.provider.base_url(),
-                1,
-                api_key,
-                config.model.clone(),
+            hypr_claw_runtime::LLMClientType::Standard(
+                hypr_claw_runtime::LLMClient::with_api_key_and_model(
+                    config.provider.base_url(),
+                    1,
+                    api_key,
+                    config.model.clone(),
+                )
             )
         }
         LLMProvider::Google => {
@@ -193,21 +196,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return Err(e.into());
                 }
             };
-            hypr_claw_runtime::LLMClient::with_api_key_and_model(
-                config.provider.base_url(),
-                1,
-                api_key,
-                config.model.clone(),
+            hypr_claw_runtime::LLMClientType::Standard(
+                hypr_claw_runtime::LLMClient::with_api_key_and_model(
+                    config.provider.base_url(),
+                    1,
+                    api_key,
+                    config.model.clone(),
+                )
             )
         }
         LLMProvider::Local { .. } => {
-            hypr_claw_runtime::LLMClient::new(config.provider.base_url(), 1)
+            hypr_claw_runtime::LLMClientType::Standard(
+                hypr_claw_runtime::LLMClient::new(config.provider.base_url(), 1)
+            )
+        }
+        LLMProvider::Codex => {
+            // Load context to check for existing tokens
+            let context_manager = hypr_claw_memory::ContextManager::new("./data/context");
+            context_manager.initialize().await?;
+            
+            let session_id = format!("{}_{}", user_id, agent_name);
+            let mut context = context_manager.load(&session_id).await?;
+            
+            // Check if we have tokens
+            let adapter = if let Some(tokens) = &context.oauth_tokens {
+                println!("[Codex] Restoring tokens from memory...");
+                println!("[Codex] Account ID: {}", tokens.account_id);
+                hypr_claw_runtime::CodexAdapter::new(config.model.clone(), Some(tokens.clone())).await?
+            } else {
+                println!("[Codex] No stored tokens. Starting OAuth flow...");
+                let tokens = hypr_claw_runtime::CodexAdapter::authenticate(config.model.clone()).await?;
+                
+                // Store tokens in context
+                context.oauth_tokens = Some(tokens.clone());
+                context_manager.save(&context).await?;
+                
+                println!("[Codex] Authentication successful!");
+                println!("[Codex] Account ID: {}", tokens.account_id);
+                hypr_claw_runtime::CodexAdapter::new(config.model.clone(), Some(tokens)).await?
+            };
+            
+            hypr_claw_runtime::LLMClientType::Codex(adapter)
         }
         LLMProvider::Antigravity | LLMProvider::GeminiCli => {
             eprintln!("❌ Antigravity/Gemini CLI not yet integrated with agent runtime");
-            eprintln!("💡 Use the chat example instead:");
-            eprintln!("   cargo run --example chat -p hypr-claw-antigravity");
-            return Err("Antigravity not integrated yet".into());
+            eprintln!("   For now, use NVIDIA, Google, Local, or Codex providers");
+            return Err("Provider not integrated yet".into());
         }
     };
 

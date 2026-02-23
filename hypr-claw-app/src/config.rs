@@ -20,6 +20,7 @@ pub enum LLMProvider {
     Antigravity,
     #[serde(rename = "gemini-cli")]
     GeminiCli,
+    Codex,
 }
 
 impl LLMProvider {
@@ -30,6 +31,7 @@ impl LLMProvider {
             LLMProvider::Local { base_url } => base_url.clone(),
             LLMProvider::Antigravity => "https://daily-cloudcode-pa.sandbox.googleapis.com".to_string(),
             LLMProvider::GeminiCli => "https://cloudcode-pa.googleapis.com".to_string(),
+            LLMProvider::Codex => "https://chatgpt.com/backend-api/codex".to_string(),
         }
     }
 
@@ -38,7 +40,7 @@ impl LLMProvider {
     }
 
     pub fn requires_oauth(&self) -> bool {
-        matches!(self, LLMProvider::Antigravity | LLMProvider::GeminiCli)
+        matches!(self, LLMProvider::Antigravity | LLMProvider::GeminiCli | LLMProvider::Codex)
     }
 }
 

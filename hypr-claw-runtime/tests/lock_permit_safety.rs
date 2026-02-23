@@ -3,6 +3,7 @@
 
 use async_trait::async_trait;
 use hypr_claw_runtime::*;
+use hypr_claw_runtime::LLMClientType;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -146,7 +147,7 @@ async fn test_lock_released_on_normal_completion() {
     let lock_mgr = Arc::new(AuditLockManager::new());
     let dispatcher = Arc::new(AuditToolDispatcher);
     let registry = Arc::new(AuditToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:9999".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, AuditSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -185,7 +186,7 @@ async fn test_lock_released_on_llm_failure() {
     let lock_mgr = Arc::new(AuditLockManager::new());
     let dispatcher = Arc::new(AuditToolDispatcher);
     let registry = Arc::new(AuditToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:9999".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, AuditSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -225,7 +226,7 @@ async fn test_lock_released_on_tool_failure() {
     let lock_mgr = Arc::new(AuditLockManager::new());
     let dispatcher = Arc::new(FailingToolDispatcher);
     let registry = Arc::new(AuditToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:9999".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, AuditSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -265,7 +266,7 @@ async fn test_multiple_requests_no_lock_leak() {
     let lock_mgr = Arc::new(AuditLockManager::new());
     let dispatcher = Arc::new(AuditToolDispatcher);
     let registry = Arc::new(AuditToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:9999".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, AuditSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -309,7 +310,7 @@ async fn test_concurrent_requests_no_lock_leak() {
     let lock_mgr = Arc::new(AuditLockManager::new());
     let dispatcher = Arc::new(AuditToolDispatcher);
     let registry = Arc::new(AuditToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:9999".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, AuditSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -366,7 +367,7 @@ async fn test_lock_balance_after_mixed_success_failure() {
     let lock_mgr = Arc::new(AuditLockManager::new());
     let dispatcher = Arc::new(AuditToolDispatcher);
     let registry = Arc::new(AuditToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:9999".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, AuditSummarizer);
 
     let agent_loop = AgentLoop::new(

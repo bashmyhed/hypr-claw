@@ -2,7 +2,7 @@
 
 use crate::compactor::{Compactor, Summarizer};
 use crate::interfaces::{LockManager, RuntimeError, SessionStore, ToolDispatcher, ToolRegistry};
-use crate::llm_client::LLMClient;
+use crate::llm_client_type::LLMClientType;
 use crate::types::{LLMResponse, Message, Role};
 use serde_json::json;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ where
     lock_manager: Arc<L>,
     tool_dispatcher: Arc<D>,
     tool_registry: Arc<R>,
-    llm_client: LLMClient,
+    llm_client: LLMClientType,
     compactor: Compactor<Sum>,
     max_iterations: usize,
 }
@@ -41,7 +41,7 @@ where
         lock_manager: Arc<L>,
         tool_dispatcher: Arc<D>,
         tool_registry: Arc<R>,
-        llm_client: LLMClient,
+        llm_client: LLMClientType,
         compactor: Compactor<Sum>,
         max_iterations: usize,
     ) -> Self {
@@ -201,6 +201,7 @@ where
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::LLMClient;
     use serde_json::json;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -294,10 +295,10 @@ mod tests {
         }
     }
 
-    fn create_mock_llm_client(_responses: Vec<LLMResponse>) -> LLMClient {
+    fn create_mock_llm_client(_responses: Vec<LLMResponse>) -> LLMClientType {
         // For testing, we'll need to mock the HTTP calls
         // This is a simplified version - in real tests we'd use a mock server
-        LLMClient::new("http://localhost:8000".to_string(), 0)
+        LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0))
     }
 
     #[tokio::test]

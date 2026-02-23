@@ -3,6 +3,7 @@
 
 use async_trait::async_trait;
 use hypr_claw_runtime::*;
+use hypr_claw_runtime::LLMClientType;
 use serde_json::json;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -113,7 +114,7 @@ async fn test_corrupted_session_load_fails_fast() {
     let lock_mgr = Arc::new(NormalLockManager::new());
     let dispatcher = Arc::new(NormalToolDispatcher);
     let registry = Arc::new(NormalToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:9999".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, NormalSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -152,7 +153,7 @@ async fn test_missing_config_file_fails_fast() {
     let lock_mgr = Arc::new(NormalLockManager::new());
     let dispatcher = Arc::new(NormalToolDispatcher);
     let registry = Arc::new(NormalToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:9999".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, NormalSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -195,7 +196,7 @@ async fn test_missing_soul_file_fails_fast() {
     let lock_mgr = Arc::new(NormalLockManager::new());
     let dispatcher = Arc::new(NormalToolDispatcher);
     let registry = Arc::new(NormalToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:9999".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, NormalSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -238,7 +239,7 @@ async fn test_invalid_yaml_config_fails_fast() {
     let lock_mgr = Arc::new(NormalLockManager::new());
     let dispatcher = Arc::new(NormalToolDispatcher);
     let registry = Arc::new(NormalToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:9999".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, NormalSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -277,7 +278,7 @@ async fn test_empty_config_file_fails_fast() {
     let lock_mgr = Arc::new(NormalLockManager::new());
     let dispatcher = Arc::new(NormalToolDispatcher);
     let registry = Arc::new(NormalToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:9999".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, NormalSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -375,7 +376,7 @@ async fn test_healthy_startup_succeeds() {
     let lock_mgr = Arc::new(NormalLockManager::new());
     let dispatcher = Arc::new(NormalToolDispatcher);
     let registry = Arc::new(NormalToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:9999".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, NormalSummarizer);
 
     let agent_loop = AgentLoop::new(

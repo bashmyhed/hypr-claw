@@ -3,6 +3,7 @@
 
 use async_trait::async_trait;
 use hypr_claw_runtime::*;
+use hypr_claw_runtime::LLMClientType;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -142,7 +143,7 @@ async fn test_llm_timeout() {
     let registry = Arc::new(MockToolRegistry);
     
     // LLM client with very short timeout will fail
-    let llm_client = LLMClient::new("http://localhost:9999".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, MockSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -189,7 +190,7 @@ async fn test_llm_malformed_response() {
     let lock_mgr = Arc::new(MockLockManager::new());
     let dispatcher = Arc::new(NormalToolDispatcher);
     let registry = Arc::new(MockToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:9999".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, MockSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -235,7 +236,7 @@ async fn test_session_store_write_failure() {
     let lock_mgr = Arc::new(MockLockManager::new());
     let dispatcher = Arc::new(NormalToolDispatcher);
     let registry = Arc::new(MockToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:9999".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, MockSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -280,7 +281,7 @@ async fn test_infinite_tool_recursion() {
     let lock_mgr = Arc::new(MockLockManager::new());
     let dispatcher = Arc::new(NormalToolDispatcher);
     let registry = Arc::new(MockToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:9999".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, MockSummarizer);
 
     // Set low max_iterations to test enforcement
@@ -326,7 +327,7 @@ async fn test_concurrent_failure_no_deadlock() {
     let lock_mgr = Arc::new(MockLockManager::new());
     let dispatcher = Arc::new(NormalToolDispatcher);
     let registry = Arc::new(MockToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:9999".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:9999".to_string(), 0));
     let compactor = Compactor::new(10000, MockSummarizer);
 
     let agent_loop = AgentLoop::new(

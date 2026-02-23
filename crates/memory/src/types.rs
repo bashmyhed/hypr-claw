@@ -1,6 +1,14 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OAuthTokens {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_at: u64,
+    pub account_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextData {
     pub session_id: String,
     pub system_state: serde_json::Value,
@@ -11,6 +19,8 @@ pub struct ContextData {
     pub tool_stats: ToolStats,
     pub last_known_environment: EnvironmentData,
     pub token_usage: TokenUsage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth_tokens: Option<OAuthTokens>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +74,7 @@ impl Default for ContextData {
             tool_stats: ToolStats::default(),
             last_known_environment: EnvironmentData::default(),
             token_usage: TokenUsage::default(),
+            oauth_tokens: None,
         }
     }
 }

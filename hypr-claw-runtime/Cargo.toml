@@ -26,6 +26,8 @@ async-trait = "0.1"
 hypr_claw = { path = "../hypr-claw-infra" }
 metrics = "0.21"
 metrics-exporter-prometheus = { version = "0.13", optional = true }
+hypr-claw-providers = { path = "../crates/providers" }
+hypr-claw-memory = { path = "../crates/memory" }
 
 [features]
 default = []

@@ -3,6 +3,7 @@
 #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 
 use hypr_claw_runtime::*;
+use hypr_claw_runtime::LLMClientType;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
@@ -113,7 +114,7 @@ async fn test_disk_write_failure() {
     let lock_manager = Arc::new(NormalLockManager);
     let dispatcher = Arc::new(MockToolDispatcher);
     let registry = Arc::new(MockToolRegistry);
-    let llm_client = LLMClient::new("http://mock".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://mock".to_string(), 0));
     let compactor = Compactor::new(1000, MockSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -145,7 +146,7 @@ async fn test_lock_acquisition_timeout() {
     let lock_manager = Arc::new(TimeoutLockManager);
     let dispatcher = Arc::new(MockToolDispatcher);
     let registry = Arc::new(MockToolRegistry);
-    let llm_client = LLMClient::new("http://mock".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://mock".to_string(), 0));
     let compactor = Compactor::new(1000, MockSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -174,7 +175,7 @@ async fn test_compactor_failure() {
     let lock_manager = Arc::new(NormalLockManager);
     let dispatcher = Arc::new(MockToolDispatcher);
     let registry = Arc::new(MockToolRegistry);
-    let llm_client = LLMClient::new("http://mock".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://mock".to_string(), 0));
     let compactor = Compactor::new(1000, FailingSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -201,7 +202,7 @@ async fn test_llm_timeout() {
     let dispatcher = Arc::new(MockToolDispatcher);
     let registry = Arc::new(MockToolRegistry);
     // Invalid URL will cause timeout
-    let llm_client = LLMClient::new("http://invalid-host-that-does-not-exist:9999".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://invalid-host-that-does-not-exist:9999".to_string(), 0));
     let compactor = Compactor::new(1000, MockSummarizer);
 
     let agent_loop = AgentLoop::new(
@@ -226,7 +227,7 @@ async fn test_llm_timeout() {
 
 #[tokio::test]
 async fn test_circuit_breaker_opens() {
-    let llm_client = LLMClient::new("http://invalid-host:9999".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://invalid-host:9999".to_string(), 0));
     
     // Trigger multiple failures
     for _ in 0..6 {

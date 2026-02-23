@@ -1,6 +1,7 @@
 //! Load and stress testing for runtime.
 
 use hypr_claw_runtime::*;
+use hypr_claw_runtime::LLMClientType;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
@@ -97,7 +98,7 @@ async fn test_concurrent_sessions_stress() {
         should_fail: false,
     });
     let registry = Arc::new(StressToolRegistry);
-    let llm_client = LLMClient::new("http://mock".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://mock".to_string(), 0));
     let compactor = Compactor::new(1000, StressSummarizer);
 
     let agent_loop = Arc::new(AgentLoop::new(
@@ -169,7 +170,7 @@ async fn test_mixed_success_failure() {
                 should_fail,
             });
             let registry = Arc::new(StressToolRegistry);
-            let llm_client = LLMClient::new("http://mock".to_string(), 0);
+            let llm_client = LLMClientType::Standard(LLMClient::new("http://mock".to_string(), 0));
             let compactor = Compactor::new(1000, StressSummarizer);
 
             let agent_loop = AgentLoop::new(
@@ -221,7 +222,7 @@ async fn test_concurrency_limit_enforcement() {
         should_fail: false,
     });
     let registry = Arc::new(StressToolRegistry);
-    let llm_client = LLMClient::new("http://mock".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://mock".to_string(), 0));
     let compactor = Compactor::new(1000, StressSummarizer);
 
     let agent_loop = AgentLoop::new(

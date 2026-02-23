@@ -110,7 +110,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use crate::compactor::Compactor;
-    use crate::llm_client::LLMClient;
+    use crate::{LLMClient, LLMClientType};
     use crate::types::Message;
     use serde_json::json;
     use std::collections::HashMap;
@@ -216,7 +216,7 @@ mod tests {
         let lock_mgr = Arc::new(MockLockManager::new());
         let dispatcher = Arc::new(MockToolDispatcher);
         let registry = Arc::new(MockToolRegistry);
-        let llm_client = LLMClient::new("http://localhost:8000".to_string(), 0);
+        let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
         let compactor = Compactor::new(10000, MockSummarizer);
 
         let agent_loop = AgentLoop::new(
@@ -248,7 +248,7 @@ mod tests {
         let lock_mgr = Arc::new(MockLockManager::new());
         let dispatcher = Arc::new(MockToolDispatcher);
         let registry = Arc::new(MockToolRegistry);
-        let llm_client = LLMClient::new("http://localhost:8000".to_string(), 0);
+        let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
         let compactor = Compactor::new(10000, MockSummarizer);
 
         let agent_loop = AgentLoop::new(
@@ -280,7 +280,7 @@ mod tests {
         let lock_mgr = Arc::new(MockLockManager::new());
         let dispatcher = Arc::new(MockToolDispatcher);
         let registry = Arc::new(MockToolRegistry);
-        let llm_client = LLMClient::new("http://localhost:8000".to_string(), 0);
+        let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
         let compactor = Compactor::new(10000, MockSummarizer);
 
         let agent_loop = AgentLoop::new(
@@ -311,7 +311,7 @@ mod tests {
         let lock_mgr = Arc::new(MockLockManager::new());
         let dispatcher = Arc::new(MockToolDispatcher);
         let registry = Arc::new(MockToolRegistry);
-        let llm_client = LLMClient::new("http://localhost:8000".to_string(), 0);
+        let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
         let compactor = Compactor::new(10000, MockSummarizer);
 
         let agent_loop = AgentLoop::new(

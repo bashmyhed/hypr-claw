@@ -3,6 +3,7 @@
 
 use async_trait::async_trait;
 use hypr_claw_runtime::*;
+use hypr_claw_runtime::LLMClientType;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -124,7 +125,7 @@ async fn test_infinite_loop_prevention() {
     let lock_mgr = Arc::new(MockLockManager::new());
     let dispatcher = Arc::new(MockToolDispatcher::new(false));
     let registry = Arc::new(MockToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:8000".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
     let compactor = Compactor::new(10000, MockSummarizer);
 
     // Set low max_iterations
@@ -186,7 +187,7 @@ async fn test_tool_not_found_handling() {
     let lock_mgr = Arc::new(MockLockManager::new());
     let dispatcher = Arc::new(MockToolDispatcher::new(true)); // Will fail
     let registry = Arc::new(MockToolRegistry);
-    let llm_client = LLMClient::new("http://localhost:8000".to_string(), 0);
+    let llm_client = LLMClientType::Standard(LLMClient::new("http://localhost:8000".to_string(), 0));
     let compactor = Compactor::new(10000, MockSummarizer);
 
     let agent_loop = AgentLoop::new(

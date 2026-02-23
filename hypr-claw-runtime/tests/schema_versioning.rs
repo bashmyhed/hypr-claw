@@ -3,6 +3,7 @@
 #![allow(clippy::unwrap_used)]
 
 use hypr_claw_runtime::{Message, LLMResponse, Role, SCHEMA_VERSION};
+use hypr_claw_runtime::LLMClientType;
 use serde_json::json;
 
 #[test]
