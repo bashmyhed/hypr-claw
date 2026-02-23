@@ -1,7 +1,14 @@
 use async_trait::async_trait;
-use hypr_claw_tools::{PermissionEngine as PermissionEngineTrait, PermissionDecision, PermissionRequest};
+use hypr_claw_tools::{
+    PermissionDecision,
+    PermissionEngine as PermissionEngineTrait,
+    PermissionRequest,
+    PermissionTier,
+};
 use crate::infra::permission_engine::PermissionEngine;
 use std::collections::HashMap;
+use std::io::{self, Write};
+use tokio::time::{timeout, Duration};
 
 #[async_trait]
 impl PermissionEngineTrait for PermissionEngine {
@@ -16,7 +23,15 @@ impl PermissionEngineTrait for PermissionEngine {
             session_key: request.session_key,
             tool_name: request.tool_name,
             input: input_map,
-            permission_level: crate::infra::contracts::PermissionLevel::SAFE,
+            permission_level: match request.permission_tier {
+                PermissionTier::Read | PermissionTier::Write => {
+                    crate::infra::contracts::PermissionLevel::SAFE
+                }
+                PermissionTier::Execute => crate::infra::contracts::PermissionLevel::REQUIRE_APPROVAL,
+                PermissionTier::SystemCritical => {
+                    crate::infra::contracts::PermissionLevel::REQUIRE_APPROVAL
+                }
+            },
         };
 
         let decision = self.check(&infra_request);
@@ -27,8 +42,33 @@ impl PermissionEngineTrait for PermissionEngine {
                 PermissionDecision::Deny("Permission denied".to_string())
             }
             crate::infra::contracts::PermissionDecision::REQUIRE_APPROVAL => {
-                PermissionDecision::RequireApproval("Approval required".to_string())
+                let description = format!(
+                    "{} with input {}",
+                    infra_request.tool_name,
+                    serde_json::to_string(&infra_request.input).unwrap_or_default()
+                );
+                if prompt_user_approval(&description).await {
+                    PermissionDecision::Allow
+                } else {
+                    PermissionDecision::Deny("Approval denied or timed out".to_string())
+                }
             }
         }
+    }
+}
+
+async fn prompt_user_approval(description: &str) -> bool {
+    print!("Approve action: {} [y/N] ", description);
+    let _ = io::stdout().flush();
+
+    let task = tokio::task::spawn_blocking(|| {
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).ok();
+        input
+    });
+
+    match timeout(Duration::from_secs(30), task).await {
+        Ok(Ok(input)) => input.trim().eq_ignore_ascii_case("y"),
+        _ => false,
     }
 }

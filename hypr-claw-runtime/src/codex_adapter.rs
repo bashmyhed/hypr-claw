@@ -61,7 +61,7 @@ impl CodexAdapter {
         &self,
         system_prompt: &str,
         messages: &[RuntimeMessage],
-        _tools: &[String],
+        _tool_schemas: &[serde_json::Value],
     ) -> Result<LLMResponse, RuntimeError> {
         let provider_messages = self.convert_messages(system_prompt, messages)?;
         
@@ -201,6 +201,8 @@ mod tests {
             provider: Arc::new(CodexProvider::new("test".to_string())),
         };
         
+        // Codex doesn't support tool calling - even with tool_calls in response,
+        // it should return Final response
         let provider_response = hypr_claw_providers::traits::GenerateResponse {
             content: None,
             tool_calls: vec![hypr_claw_providers::traits::ToolCall {
@@ -213,12 +215,12 @@ mod tests {
         let result = adapter.convert_response(provider_response);
         assert!(result.is_ok());
         
+        // Codex adapter always returns Final, never ToolCall
         match result.unwrap() {
-            LLMResponse::ToolCall { tool_name, input, .. } => {
-                assert_eq!(tool_name, "echo");
-                assert_eq!(input, json!({"message": "test"}));
+            LLMResponse::Final { content, .. } => {
+                assert_eq!(content, ""); // No content provided
             }
-            _ => panic!("Expected ToolCall response"),
+            _ => panic!("Expected Final response from Codex adapter"),
         }
     }
 }

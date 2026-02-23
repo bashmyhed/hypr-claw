@@ -802,6 +802,8 @@ name = "hypr-claw-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "chrono",
  "hypr-claw-core",
  "hypr-claw-executor",
  "hypr-claw-interfaces",
@@ -982,6 +984,7 @@ dependencies = [
  "rlimit",
  "serde",
  "serde_json",
+ "sysinfo",
  "tempfile",
  "thiserror",
  "tokio",

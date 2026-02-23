@@ -17,11 +17,11 @@ impl LLMClientType {
         &self,
         system_prompt: &str,
         messages: &[Message],
-        tools: &[String],
+        tool_schemas: &[serde_json::Value],
     ) -> Result<LLMResponse, RuntimeError> {
         match self {
-            Self::Standard(client) => client.call(system_prompt, messages, tools).await,
-            Self::Codex(adapter) => adapter.call(system_prompt, messages, tools).await,
+            Self::Standard(client) => client.call(system_prompt, messages, tool_schemas).await,
+            Self::Codex(adapter) => adapter.call(system_prompt, messages, tool_schemas).await,
         }
     }
 }

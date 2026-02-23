@@ -15,11 +15,15 @@ system_prompt: |
 config:
   allowed_tools:
     - echo
-    - system_info
-    - file_read
-    - file_write
-    - file_list
-    - process_list
+    - fs.read
+    - fs.write
+    - fs.list
+    - fs.create_dir
+    - fs.move
+    - fs.copy
+    - proc.spawn
+    - proc.list
+    - hypr.workspace.switch
   autonomy_mode: auto
   max_iterations: 50
   risk_tolerance: low

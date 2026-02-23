@@ -34,6 +34,8 @@ serde_yaml = "0.9"
 anyhow = "1.0"
 rpassword = "7.3"
 rand = "0.8"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 parking_lot = "0.12"

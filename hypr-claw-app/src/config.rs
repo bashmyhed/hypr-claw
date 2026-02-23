@@ -42,6 +42,13 @@ impl LLMProvider {
     pub fn requires_oauth(&self) -> bool {
         matches!(self, LLMProvider::Antigravity | LLMProvider::GeminiCli | LLMProvider::Codex)
     }
+
+    pub fn supports_function_calling(&self) -> bool {
+        matches!(
+            self,
+            LLMProvider::Nvidia | LLMProvider::Google | LLMProvider::Local { .. }
+        )
+    }
 }
 
 impl Config {

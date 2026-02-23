@@ -15,10 +15,11 @@ system_prompt: |
 config:
   allowed_tools:
     - echo
-    - system_info
-    - file_read
-    - file_list
-    - process_list
+    - fs.read
+    - fs.list
+    - proc.list
+    - system.memory
+    - system.battery
   autonomy_mode: confirm
   max_iterations: 15
   risk_tolerance: low

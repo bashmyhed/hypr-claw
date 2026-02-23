@@ -3,8 +3,10 @@
 #![allow(clippy::unwrap_used)]
 
 use hypr_claw_runtime::{SessionStore, Message};
+use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
+use async_trait::async_trait;
 
 #[tokio::test]
 async fn test_session_persistence_across_restarts() {
@@ -93,7 +95,7 @@ async fn test_session_not_corrupted_on_error() {
             async_locks,
             dispatcher,
             registry,
-            llm_client,
+            hypr_claw_runtime::LLMClientType::Standard(llm_client),
             compactor,
             5,
         );
@@ -117,8 +119,9 @@ async fn test_session_not_corrupted_on_error() {
 // Mock implementations
 struct MockDispatcher;
 
+#[async_trait]
 impl hypr_claw_runtime::ToolDispatcher for MockDispatcher {
-    fn execute(
+    async fn execute(
         &self,
         _tool_name: &str,
         _input: &serde_json::Value,
@@ -134,6 +137,25 @@ impl hypr_claw_runtime::ToolRegistry for MockRegistry {
     fn get_active_tools(&self, _agent_id: &str) -> Vec<String> {
         vec!["test".to_string()]
     }
+
+        fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
+            vec![
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": "echo",
+                        "description": "Echo a message",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "message": {"type": "string"}
+                            },
+                            "required": ["message"]
+                        }
+                    }
+                })
+            ]
+        }
 }
 
 struct MockSummarizer;

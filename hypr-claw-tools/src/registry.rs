@@ -29,6 +29,22 @@ impl ToolRegistryImpl {
     pub fn count(&self) -> usize {
         self.tools.len()
     }
+    
+    pub fn schemas(&self) -> Vec<serde_json::Value> {
+        self.tools
+            .values()
+            .map(|tool| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name(),
+                        "description": tool.description(),
+                        "parameters": tool.schema()
+                    }
+                })
+            })
+            .collect()
+    }
 }
 
 impl Default for ToolRegistryImpl {

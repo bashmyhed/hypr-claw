@@ -14,7 +14,7 @@ use tracing::{debug, warn};
 struct LLMRequest {
     system_prompt: String,
     messages: Vec<Message>,
-    tools: Vec<String>,
+    tools: Vec<serde_json::Value>,
 }
 
 /// OpenAI-compatible request format for NVIDIA/Google
@@ -22,6 +22,10 @@ struct LLMRequest {
 struct OpenAIRequest {
     model: String,
     messages: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
 }
@@ -161,7 +165,7 @@ impl LLMClient {
     /// # Arguments
     /// * `system_prompt` - System prompt for the LLM
     /// * `messages` - Conversation history
-    /// * `tools` - Available tools
+    /// * `tool_schemas` - Available tool schemas in OpenAI function format
     ///
     /// # Returns
     /// Normalized LLMResponse
@@ -172,19 +176,26 @@ impl LLMClient {
         &self,
         system_prompt: &str,
         messages: &[Message],
-        tools: &[String],
+        tool_schemas: &[serde_json::Value],
     ) -> Result<LLMResponse, RuntimeError> {
         let _timer = crate::metrics::MetricTimer::new("llm_request_latency");
 
         // Check circuit breaker
         self.circuit_breaker.should_allow_request()?;
+        
+        // CRITICAL: Validate tools are not empty
+        if tool_schemas.is_empty() {
+            return Err(RuntimeError::LLMError(
+                "Cannot call LLM with empty tool schemas. Agent must have tools registered.".to_string()
+            ));
+        }
 
         let mut last_error = None;
         
         for attempt in 0..=self.max_retries {
             debug!("LLM call attempt {}/{}", attempt + 1, self.max_retries + 1);
             
-            match self.call_once(system_prompt, messages, tools).await {
+            match self.call_once(system_prompt, messages, tool_schemas).await {
                 Ok(response) => {
                     self.circuit_breaker.record_success();
                     return Ok(response);
@@ -212,7 +223,7 @@ impl LLMClient {
         &self,
         system_prompt: &str,
         messages: &[Message],
-        tools: &[String],
+        tool_schemas: &[serde_json::Value],
     ) -> Result<LLMResponse, RuntimeError> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         
@@ -239,21 +250,31 @@ impl LLMClient {
                     crate::types::Role::Tool => "tool",
                     crate::types::Role::System => "system",
                 };
+                
+                // For tool messages, serialize content as JSON string
+                let content_value = if matches!(msg.role, crate::types::Role::Tool) {
+                    serde_json::Value::String(msg.content.to_string())
+                } else {
+                    msg.content.clone()
+                };
+                
                 openai_messages.push(serde_json::json!({
                     "role": role_str,
-                    "content": &msg.content
+                    "content": content_value
                 }));
             }
             
             let openai_request = OpenAIRequest {
                 model: model.clone(),
                 messages: openai_messages,
+                tools: Some(tool_schemas.to_vec()),
+                tool_choice: Some("auto".to_string()),
                 max_tokens: Some(2048),
             };
             
-            println!("DEBUG: FINAL_URL = {}", url);
-            println!("DEBUG: Has API key = {}", self.api_key.is_some());
-            println!("DEBUG: Request body = {}", serde_json::to_string_pretty(&openai_request).unwrap_or_default());
+            debug!("llm url={}", url);
+            debug!("llm api_key_present={}", self.api_key.is_some());
+            debug!("llm tools_count={}", tool_schemas.len());
             
             req_builder = req_builder.json(&openai_request);
         } else {
@@ -261,11 +282,11 @@ impl LLMClient {
             let request = LLMRequest {
                 system_prompt: system_prompt.to_string(),
                 messages: messages.to_vec(),
-                tools: tools.to_vec(),
+                tools: tool_schemas.to_vec(),
             };
             
-            println!("DEBUG: FINAL_URL = {}", url);
-            println!("DEBUG: Request body = {}", serde_json::to_string_pretty(&request).unwrap_or_default());
+            debug!("llm url={}", url);
+            debug!("llm tools_count={}", tool_schemas.len());
             
             req_builder = req_builder.json(&request);
         }
@@ -468,7 +489,20 @@ mod tests {
         let request = LLMRequest {
             system_prompt: "You are helpful".to_string(),
             messages,
-            tools: vec!["search".to_string()],
+            tools: vec![json!({
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "description": "Search for information",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"}
+                        },
+                        "required": ["query"]
+                    }
+                }
+            })],
         };
         
         let serialized = serde_json::to_string(&request).unwrap();

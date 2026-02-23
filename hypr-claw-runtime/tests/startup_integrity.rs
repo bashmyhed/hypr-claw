@@ -71,8 +71,9 @@ impl LockManager for NormalLockManager {
 
 struct NormalToolDispatcher;
 
+#[async_trait]
 impl ToolDispatcher for NormalToolDispatcher {
-    fn execute(
+    async fn execute(
         &self,
         tool_name: &str,
         _input: &serde_json::Value,
@@ -88,6 +89,25 @@ impl ToolRegistry for NormalToolRegistry {
     fn get_active_tools(&self, _agent_id: &str) -> Vec<String> {
         vec![]
     }
+
+        fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
+            vec![
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": "echo",
+                        "description": "Echo a message",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "message": {"type": "string"}
+                            },
+                            "required": ["message"]
+                        }
+                    }
+                })
+            ]
+        }
 }
 
 struct NormalSummarizer;

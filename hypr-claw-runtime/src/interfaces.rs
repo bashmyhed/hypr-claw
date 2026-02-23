@@ -50,9 +50,10 @@ pub trait LockManager: Send + Sync {
 }
 
 /// Tool execution interface.
+#[async_trait]
 pub trait ToolDispatcher: Send + Sync {
     /// Execute a tool and return result.
-    fn execute(
+    async fn execute(
         &self,
         tool_name: &str,
         input: &serde_json::Value,
@@ -62,8 +63,11 @@ pub trait ToolDispatcher: Send + Sync {
 
 /// Tool discovery interface.
 pub trait ToolRegistry: Send + Sync {
-    /// Get list of active tools for an agent.
+    /// Get list of active tool names for an agent.
     fn get_active_tools(&self, agent_id: &str) -> Vec<String>;
+    
+    /// Get full tool schemas for an agent in OpenAI function format.
+    fn get_tool_schemas(&self, agent_id: &str) -> Vec<serde_json::Value>;
 }
 
 #[cfg(test)]
@@ -131,8 +135,9 @@ mod tests {
 
     struct MockToolDispatcher;
 
+    #[async_trait]
     impl ToolDispatcher for MockToolDispatcher {
-        fn execute(
+        async fn execute(
             &self,
             tool_name: &str,
             _input: &serde_json::Value,
@@ -158,6 +163,25 @@ mod tests {
         fn get_active_tools(&self, agent_id: &str) -> Vec<String> {
             let tools = self.tools.lock().unwrap();
             tools.get(agent_id).cloned().unwrap_or_default()
+        }
+        
+        fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
+            vec![
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": "echo",
+                        "description": "Echo a message",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "message": {"type": "string"}
+                            },
+                            "required": ["message"]
+                        }
+                    }
+                })
+            ]
         }
     }
 
@@ -210,10 +234,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_tool_dispatcher_execute() {
+    #[tokio::test]
+    async fn test_tool_dispatcher_execute() {
         let dispatcher = MockToolDispatcher;
-        let result = dispatcher.execute("search", &json!({"query": "test"}), "test:user1").unwrap();
+        let result = dispatcher
+            .execute("search", &json!({"query": "test"}), "test:user1")
+            .await
+            .unwrap();
         
         assert_eq!(result["status"], "success");
         assert_eq!(result["tool"], "search");

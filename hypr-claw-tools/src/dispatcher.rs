@@ -53,10 +53,12 @@ impl ToolDispatcherImpl {
             session_key: session_key.clone(),
             tool_name: tool_name.clone(),
             input: input.clone(),
+            permission_tier: tool.permission_tier(),
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
 
         // 4. Check permission
+        let permission_tier = perm_request.permission_tier;
         let decision = self.permission.check(perm_request).await;
 
         let result = match &decision {
@@ -78,7 +80,15 @@ impl ToolDispatcherImpl {
         };
 
         // 10. Always audit (isolated from result)
-        self.log_audit_isolated(&session_key, &tool_name, &input, &result, &decision).await;
+        self.log_audit_isolated(
+            &session_key,
+            &tool_name,
+            &input,
+            &result,
+            &decision,
+            permission_tier,
+        )
+        .await;
 
         result
     }
@@ -140,6 +150,7 @@ impl ToolDispatcherImpl {
         input: &serde_json::Value,
         result: &Result<ToolResult, ToolError>,
         decision: &PermissionDecision,
+        permission_tier: crate::traits::PermissionTier,
     ) {
         // Audit logging must never fail the operation
         let log_entry = json!({
@@ -152,6 +163,7 @@ impl ToolDispatcherImpl {
                 PermissionDecision::Deny(_) => "DENY",
                 PermissionDecision::RequireApproval(_) => "REQUIRE_APPROVAL",
             },
+            "permission_tier": format!("{permission_tier:?}"),
             "result": match result {
                 Ok(r) => json!({"success": r.success, "output": &r.output, "error": &r.error}),
                 Err(e) => json!({"error": e.to_string()}),

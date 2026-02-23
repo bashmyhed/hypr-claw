@@ -19,11 +19,12 @@ system_prompt: |
 config:
   allowed_tools:
     - echo
-    - system_info
-    - file_read
-    - file_write
-    - file_list
-    - process_list
+    - fs.read
+    - fs.write
+    - fs.list
+    - system.memory
+    - system.battery
+    - proc.list
   autonomy_mode: confirm
   max_iterations: 10
   risk_tolerance: low

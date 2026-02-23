@@ -8,6 +8,7 @@ use crate::error::ToolError;
 use crate::execution_context::ExecutionContext;
 use crate::sandbox::CommandGuard;
 use crate::tools::base::{Tool, ToolResult};
+use crate::traits::PermissionTier;
 
 #[derive(Deserialize)]
 struct ShellExecInput {
@@ -37,6 +38,10 @@ impl Tool for ShellExecTool {
             },
             "required": ["cmd"]
         })
+    }
+
+    fn permission_tier(&self) -> PermissionTier {
+        PermissionTier::SystemCritical
     }
 
     async fn execute(

@@ -1,6 +1,14 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionTier {
+    Read,
+    Write,
+    Execute,
+    SystemCritical,
+}
+
 /// Permission decision result
 #[derive(Debug, Clone)]
 pub enum PermissionDecision {
@@ -15,6 +23,7 @@ pub struct PermissionRequest {
     pub session_key: String,
     pub tool_name: String,
     pub input: Value,
+    pub permission_tier: PermissionTier,
     pub timestamp: String,
 }
 

@@ -14,11 +14,27 @@ system_prompt: |
 config:
   allowed_tools:
     - echo
-    - system_info
-    - file_read
-    - file_write
-    - file_list
-    - process_list
+    - fs.read
+    - fs.write
+    - fs.list
+    - fs.create_dir
+    - fs.move
+    - fs.copy
+    - fs.delete
+    - proc.spawn
+    - proc.kill
+    - proc.list
+    - hypr.workspace.switch
+    - hypr.workspace.move_window
+    - hypr.window.focus
+    - hypr.window.close
+    - hypr.window.move
+    - hypr.exec
+    - wallpaper.set
+    - system.memory
+    - system.battery
+    - system.shutdown
+    - system.reboot
   autonomy_mode: confirm
   max_iterations: 20
   risk_tolerance: medium

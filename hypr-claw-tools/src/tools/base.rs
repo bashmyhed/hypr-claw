@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use crate::error::ToolError;
 use crate::execution_context::ExecutionContext;
+use crate::traits::PermissionTier;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
@@ -15,6 +16,9 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
     fn schema(&self) -> serde_json::Value;
+    fn permission_tier(&self) -> PermissionTier {
+        PermissionTier::Write
+    }
     
     async fn execute(
         &self,

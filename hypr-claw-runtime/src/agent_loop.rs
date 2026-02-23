@@ -106,12 +106,28 @@ where
         // Append user message
         messages.push(Message::new(Role::User, json!(user_message)));
 
-        // Get available tools
-        let tools = self.tool_registry.get_active_tools(agent_id);
+        // Get available tool schemas
+        let tool_schemas = self.tool_registry.get_tool_schemas(agent_id);
+        
+        // CRITICAL: Fail early if no tools available
+        if tool_schemas.is_empty() {
+            warn!("No tools available for agent: {}", agent_id);
+            return Err(RuntimeError::LLMError(
+                "Agent has no tools registered. Cannot execute OS operations.".to_string()
+            ));
+        }
+        
+        info!("Agent {} has {} tools available", agent_id, tool_schemas.len());
 
         // Execute LLM loop
         let final_response = self
-            .execute_loop(session_key, system_prompt, &mut messages, &tools)
+            .execute_loop(
+                session_key,
+                system_prompt,
+                user_message,
+                &mut messages,
+                &tool_schemas,
+            )
             .await?;
 
         // Append final response
@@ -128,9 +144,30 @@ where
         &self,
         session_key: &str,
         system_prompt: &str,
+        user_message: &str,
         messages: &mut Vec<Message>,
-        tools: &[String],
+        tool_schemas: &[serde_json::Value],
     ) -> Result<String, RuntimeError> {
+        // Reinforce system prompt with tool capability
+        let tool_names: Vec<String> = tool_schemas
+            .iter()
+            .filter_map(|schema| {
+                schema.get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        
+        let reinforced_prompt = format!(
+            "{}\n\nYou are a local autonomous Linux agent. You MUST use tools to perform file, process, wallpaper, or system operations. Do not describe actions — call the appropriate tool.\n\nAvailable tools: {}",
+            system_prompt,
+            tool_names.join(", ")
+        );
+        
+        let action_requires_tool = requires_tool_call_for_user_message(user_message);
+        let mut saw_tool_call = false;
+
         for iteration in 0..self.max_iterations {
             debug!(
                 "LLM loop iteration {}/{}",
@@ -138,10 +175,10 @@ where
                 self.max_iterations
             );
 
-            // Call LLM
+            // Call LLM with reinforced prompt
             let response = self
                 .llm_client
-                .call(system_prompt, messages, tools)
+                .call(&reinforced_prompt, messages, tool_schemas)
                 .await
                 .map_err(|e| {
                     error!("LLM call failed: {}", e);
@@ -151,10 +188,16 @@ where
             // Handle response type
             match response {
                 LLMResponse::Final { content, .. } => {
+                    if action_requires_tool && !saw_tool_call {
+                        return Err(RuntimeError::ToolError(
+                            "Tool invocation required but not performed".to_string(),
+                        ));
+                    }
                     info!("LLM returned final response after {} iterations", iteration + 1);
                     return Ok(content);
                 }
                 LLMResponse::ToolCall { tool_name, input, .. } => {
+                    saw_tool_call = true;
                     info!("LLM requested tool: {}", tool_name);
 
                     // Append tool call message
@@ -169,7 +212,11 @@ where
                     ));
 
                     // Execute tool
-                    let tool_result = match self.tool_dispatcher.execute(&tool_name, &input, session_key) {
+                    let tool_result = match self
+                        .tool_dispatcher
+                        .execute(&tool_name, &input, session_key)
+                        .await
+                    {
                         Ok(result) => result,
                         Err(e) => {
                             warn!("Tool execution failed: {}", e);
@@ -195,6 +242,37 @@ where
             self.max_iterations
         )))
     }
+}
+
+fn requires_tool_call_for_user_message(user_message: &str) -> bool {
+    let lower = user_message.to_lowercase();
+    let action_tokens = [
+        "create",
+        "delete",
+        "remove",
+        "move",
+        "copy",
+        "read",
+        "write",
+        "list",
+        "open",
+        "switch",
+        "workspace",
+        "focus",
+        "close",
+        "wallpaper",
+        "spawn",
+        "start",
+        "stop",
+        "kill",
+        "run",
+        "execute",
+        "build",
+        "install",
+        "shutdown",
+        "reboot",
+    ];
+    action_tokens.iter().any(|token| lower.contains(token))
 }
 
 #[cfg(test)]
@@ -268,8 +346,9 @@ mod tests {
 
     struct MockToolDispatcher;
 
+    #[async_trait]
     impl ToolDispatcher for MockToolDispatcher {
-        fn execute(
+        async fn execute(
             &self,
             tool_name: &str,
             _input: &serde_json::Value,
@@ -284,6 +363,25 @@ mod tests {
     impl ToolRegistry for MockToolRegistry {
         fn get_active_tools(&self, _agent_id: &str) -> Vec<String> {
             vec![]
+        }
+        
+        fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
+            vec![
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": "echo",
+                        "description": "Echo a message",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "message": {"type": "string"}
+                            },
+                            "required": ["message"]
+                        }
+                    }
+                })
+            ]
         }
     }
 

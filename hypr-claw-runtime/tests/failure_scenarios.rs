@@ -46,8 +46,9 @@ impl LockManager for TimeoutLockManager {
 
 struct MockToolDispatcher;
 
+#[async_trait]
 impl ToolDispatcher for MockToolDispatcher {
-    fn execute(
+    async fn execute(
         &self,
         _tool_name: &str,
         _input: &serde_json::Value,
@@ -63,6 +64,25 @@ impl ToolRegistry for MockToolRegistry {
     fn get_active_tools(&self, _agent_id: &str) -> Vec<String> {
         vec!["test".to_string()]
     }
+
+        fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
+            vec![
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": "echo",
+                        "description": "Echo a message",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "message": {"type": "string"}
+                            },
+                            "required": ["message"]
+                        }
+                    }
+                })
+            ]
+        }
 }
 
 struct FailingSummarizer;
@@ -229,14 +249,27 @@ async fn test_llm_timeout() {
 async fn test_circuit_breaker_opens() {
     let llm_client = LLMClientType::Standard(LLMClient::new("http://invalid-host:9999".to_string(), 0));
     
+    // Create dummy tool schema
+    let dummy_tools = vec![json!({
+        "type": "function",
+        "function": {
+            "name": "test",
+            "description": "Test tool",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    })];
+    
     // Trigger multiple failures
     for _ in 0..6 {
-        let result = llm_client.call("system", &[], &[]).await;
+        let result = llm_client.call("system", &[], &dummy_tools).await;
         assert!(result.is_err());
     }
     
     // Circuit breaker should be open now
-    let result = llm_client.call("system", &[], &[]).await;
+    let result = llm_client.call("system", &[], &dummy_tools).await;
     assert!(result.is_err());
     match result {
         Err(RuntimeError::LLMError(msg)) => {

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
@@ -13,6 +14,10 @@ pub enum TaskError {
     AlreadyExists(String),
     #[error("Task execution failed: {0}")]
     ExecutionFailed(String),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Serialization error: {0}")]
+    Serialization(#[from] serde_json::Error),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -43,13 +48,57 @@ struct TaskHandle {
 
 pub struct TaskManager {
     tasks: Arc<RwLock<HashMap<String, Arc<Mutex<TaskHandle>>>>>,
+    state_file: Option<PathBuf>,
 }
 
 impl TaskManager {
     pub fn new() -> Self {
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
+            state_file: None,
         }
+    }
+
+    pub fn with_state_file<P: AsRef<Path>>(state_file: P) -> Self {
+        Self {
+            tasks: Arc::new(RwLock::new(HashMap::new())),
+            state_file: Some(state_file.as_ref().to_path_buf()),
+        }
+    }
+
+    pub async fn restore(&self) -> Result<(), TaskError> {
+        let Some(state_file) = &self.state_file else {
+            return Ok(());
+        };
+
+        if !state_file.exists() {
+            return Ok(());
+        }
+
+        let content = tokio::fs::read_to_string(state_file).await?;
+        let mut task_infos: Vec<TaskInfo> = serde_json::from_str(&content)?;
+        let now = chrono::Utc::now().timestamp();
+
+        for task in &mut task_infos {
+            if task.status == TaskStatus::Running || task.status == TaskStatus::Pending {
+                task.status = TaskStatus::Failed;
+                task.error = Some("Interrupted by restart".to_string());
+                task.updated_at = now;
+            }
+        }
+
+        let mut tasks = self.tasks.write().await;
+        tasks.clear();
+        for info in task_infos {
+            tasks.insert(
+                info.id.clone(),
+                Arc::new(Mutex::new(TaskHandle { info, handle: None })),
+            );
+        }
+        drop(tasks);
+
+        self.persist_state().await?;
+        Ok(())
     }
 
     pub async fn spawn_task<F, Fut>(
@@ -89,6 +138,8 @@ impl TaskManager {
 
         let mut tasks = self.tasks.write().await;
         tasks.insert(id.clone(), task_handle);
+        drop(tasks);
+        self.persist_state().await?;
 
         tracing::info!("Spawned task: {}", id);
         Ok(id)
@@ -101,6 +152,7 @@ impl TaskManager {
             .ok_or_else(|| TaskError::NotFound(id.to_string()))?;
 
         let mut task_guard = task.lock().await;
+        let mut changed = false;
 
         // Check if task completed
         if let Some(handle) = &mut task_guard.handle {
@@ -124,10 +176,19 @@ impl TaskManager {
                     }
                 }
                 task_guard.info.updated_at = chrono::Utc::now().timestamp();
+                changed = true;
             }
         }
 
-        Ok(task_guard.info.clone())
+        let info = task_guard.info.clone();
+        drop(task_guard);
+        drop(tasks);
+
+        if changed {
+            self.persist_state().await?;
+        }
+
+        Ok(info)
     }
 
     pub async fn cancel_task(&self, id: &str) -> Result<(), TaskError> {
@@ -144,6 +205,9 @@ impl TaskManager {
             task_guard.info.updated_at = chrono::Utc::now().timestamp();
             tracing::info!("Cancelled task: {}", id);
         }
+        drop(task_guard);
+        drop(tasks);
+        self.persist_state().await?;
 
         Ok(())
     }
@@ -173,6 +237,32 @@ impl TaskManager {
                 true
             }
         });
+        drop(tasks);
+        let _ = self.persist_state().await;
+    }
+
+    async fn persist_state(&self) -> Result<(), TaskError> {
+        let Some(state_file) = &self.state_file else {
+            return Ok(());
+        };
+
+        let tasks = self.tasks.read().await;
+        let mut snapshot = Vec::with_capacity(tasks.len());
+        for task in tasks.values() {
+            let guard = task.lock().await;
+            snapshot.push(guard.info.clone());
+        }
+
+        if let Some(parent) = state_file.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let tmp_file = state_file.with_extension("tmp");
+        let content = serde_json::to_string_pretty(&snapshot)?;
+        tokio::fs::write(&tmp_file, content).await?;
+        tokio::fs::rename(tmp_file, state_file).await?;
+
+        Ok(())
     }
 }
 

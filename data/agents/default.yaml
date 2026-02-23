@@ -2,7 +2,15 @@ id: default
 soul: default_soul.md
 tools:
   - echo
-  - file_read
-  - file_write
-  - file_list
-  - shell_exec
+  - fs.read
+  - fs.write
+  - fs.list
+  - fs.create_dir
+  - fs.move
+  - fs.copy
+  - fs.delete
+  - hypr.workspace.switch
+  - hypr.exec
+  - proc.spawn
+  - proc.list
+  - wallpaper.set

@@ -1,5 +1,6 @@
 use std::io::{self, Write};
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 pub mod config;
@@ -66,6 +67,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Using provider: {}", provider_name);
     println!();
 
+    if !config.provider.supports_function_calling() {
+        eprintln!(
+            "❌ Provider '{}' does not support function/tool calling in agent mode.",
+            provider_name
+        );
+        eprintln!("   Use NVIDIA, Google, or Local providers for autonomous execution.");
+        return Err("Provider capability check failed".into());
+    }
+
     // Get user input
     print!("Enter agent name [default]: ");
     io::stdout().flush()?;
@@ -91,17 +101,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     io::stdin().read_line(&mut user_id)?;
     let user_id = user_id.trim();
     let user_id = if user_id.is_empty() { "local_user" } else { user_id };
+    let session_key = format!("{}:{}", user_id, agent_name);
 
-    print!("Enter task: ");
-    io::stdout().flush()?;
-    let mut task = String::new();
-    io::stdin().read_line(&mut task)?;
-    let task = task.trim().to_string();
-
-    if task.is_empty() {
-        eprintln!("❌ Task cannot be empty");
-        return Ok(());
+    let context_manager = hypr_claw_memory::ContextManager::new("./data/context");
+    context_manager.initialize().await?;
+    let mut context = context_manager.load(&session_key).await?;
+    if context.session_id.is_empty() {
+        context.session_id = session_key.clone();
     }
+
+    let mut active_soul_id = if context.active_soul_id.is_empty() {
+        "safe_assistant".to_string()
+    } else {
+        context.active_soul_id.clone()
+    };
+    let mut active_soul = match load_soul_profile(&active_soul_id).await {
+        Ok(soul) => soul,
+        Err(e) => {
+            eprintln!(
+                "⚠️  Failed to load soul '{}': {}. Falling back to safe_assistant.",
+                active_soul_id, e
+            );
+            active_soul_id = "safe_assistant".to_string();
+            load_soul_profile(&active_soul_id).await?
+        }
+    };
+    context.active_soul_id = active_soul_id.clone();
+    context_manager.save(&context).await?;
 
     println!("\n🔧 Initializing system...");
 
@@ -132,26 +158,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create tool registry
     let mut registry = hypr_claw_tools::ToolRegistryImpl::new();
     registry.register(Arc::new(hypr_claw_tools::tools::EchoTool));
-    
-    if let Ok(tool) = hypr_claw_tools::tools::FileReadTool::new("./sandbox") {
-        registry.register(Arc::new(tool));
-    } else {
-        eprintln!("⚠️  Warning: FileReadTool initialization failed");
-    }
-    
-    if let Ok(tool) = hypr_claw_tools::tools::FileWriteTool::new("./sandbox") {
-        registry.register(Arc::new(tool));
-    } else {
-        eprintln!("⚠️  Warning: FileWriteTool initialization failed");
-    }
-    
-    if let Ok(tool) = hypr_claw_tools::tools::FileListTool::new("./sandbox") {
-        registry.register(Arc::new(tool));
-    } else {
-        eprintln!("⚠️  Warning: FileListTool initialization failed");
-    }
-    
-    registry.register(Arc::new(hypr_claw_tools::tools::ShellExecTool));
+
+    // Register OS capability tools
+    registry.register(Arc::new(hypr_claw_tools::os_tools::FsCreateDirTool));
+    registry.register(Arc::new(hypr_claw_tools::os_tools::FsDeleteTool));
+    registry.register(Arc::new(hypr_claw_tools::os_tools::FsMoveTool));
+    registry.register(Arc::new(hypr_claw_tools::os_tools::FsCopyTool));
+    registry.register(Arc::new(hypr_claw_tools::os_tools::FsReadTool));
+    registry.register(Arc::new(hypr_claw_tools::os_tools::FsWriteTool));
+    registry.register(Arc::new(hypr_claw_tools::os_tools::FsListTool));
+    registry.register(Arc::new(hypr_claw_tools::os_tools::HyprWorkspaceSwitchTool));
+    registry.register(Arc::new(hypr_claw_tools::os_tools::HyprWorkspaceMoveWindowTool));
+    registry.register(Arc::new(hypr_claw_tools::os_tools::HyprWindowFocusTool));
+    registry.register(Arc::new(hypr_claw_tools::os_tools::HyprWindowCloseTool));
+    registry.register(Arc::new(hypr_claw_tools::os_tools::HyprWindowMoveTool));
+    registry.register(Arc::new(hypr_claw_tools::os_tools::HyprExecTool));
+    registry.register(Arc::new(hypr_claw_tools::os_tools::ProcSpawnTool));
+    registry.register(Arc::new(hypr_claw_tools::os_tools::ProcKillTool));
+    registry.register(Arc::new(hypr_claw_tools::os_tools::ProcListTool));
+    registry.register(Arc::new(hypr_claw_tools::os_tools::WallpaperSetTool));
+    registry.register(Arc::new(hypr_claw_tools::os_tools::SystemShutdownTool));
+    registry.register(Arc::new(hypr_claw_tools::os_tools::SystemRebootTool));
+    registry.register(Arc::new(hypr_claw_tools::os_tools::SystemBatteryTool));
+    registry.register(Arc::new(hypr_claw_tools::os_tools::SystemMemoryTool));
 
     let registry_arc = Arc::new(registry);
 
@@ -163,9 +192,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         5000,
     ));
 
+    let agent_config_path = format!("./data/agents/{}.yaml", agent_name);
+    let agent_tools = load_agent_tool_set(&agent_config_path);
+    let allowed_tools = resolve_allowed_tools(&active_soul.allowed_tools, &agent_tools);
+    if allowed_tools.is_empty() {
+        return Err(format!("Soul '{}' has no allowed tools after filtering", active_soul_id).into());
+    }
+    let allowed_tools_state = Arc::new(RwLock::new(allowed_tools.clone()));
+
     // Create runtime adapters
     let runtime_dispatcher = Arc::new(RuntimeDispatcherAdapter::new(dispatcher));
-    let runtime_registry = Arc::new(RuntimeRegistryAdapter::new(registry_arc));
+    let runtime_registry = Arc::new(RuntimeRegistryAdapter::new(
+        registry_arc,
+        allowed_tools_state.clone(),
+    ));
 
     // Initialize LLM client based on provider
     let llm_client = match &config.provider {
@@ -210,38 +250,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 hypr_claw_runtime::LLMClient::new(config.provider.base_url(), 1)
             )
         }
-        LLMProvider::Codex => {
-            // Load context to check for existing tokens
-            let context_manager = hypr_claw_memory::ContextManager::new("./data/context");
-            context_manager.initialize().await?;
-            
-            let session_id = format!("{}_{}", user_id, agent_name);
-            let mut context = context_manager.load(&session_id).await?;
-            
-            // Check if we have tokens
-            let adapter = if let Some(tokens) = &context.oauth_tokens {
-                println!("[Codex] Restoring tokens from memory...");
-                println!("[Codex] Account ID: {}", tokens.account_id);
-                hypr_claw_runtime::CodexAdapter::new(config.model.clone(), Some(tokens.clone())).await?
-            } else {
-                println!("[Codex] No stored tokens. Starting OAuth flow...");
-                let tokens = hypr_claw_runtime::CodexAdapter::authenticate(config.model.clone()).await?;
-                
-                // Store tokens in context
-                context.oauth_tokens = Some(tokens.clone());
-                context_manager.save(&context).await?;
-                
-                println!("[Codex] Authentication successful!");
-                println!("[Codex] Account ID: {}", tokens.account_id);
-                hypr_claw_runtime::CodexAdapter::new(config.model.clone(), Some(tokens)).await?
-            };
-            
-            hypr_claw_runtime::LLMClientType::Codex(adapter)
-        }
-        LLMProvider::Antigravity | LLMProvider::GeminiCli => {
-            eprintln!("❌ Antigravity/Gemini CLI not yet integrated with agent runtime");
-            eprintln!("   For now, use NVIDIA, Google, Local, or Codex providers");
-            return Err("Provider not integrated yet".into());
+        LLMProvider::Codex | LLMProvider::Antigravity | LLMProvider::GeminiCli => {
+            return Err("Provider does not support agent-mode tool calling".into());
         }
     };
 
@@ -253,73 +263,189 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         async_session,
         async_locks,
         runtime_dispatcher,
-        runtime_registry,
+        runtime_registry.clone(),
         llm_client,
         compactor,
-        10,
+        active_soul.max_iterations,
     );
 
-    // Create runtime controller
-    let controller = hypr_claw_runtime::RuntimeController::new(agent_loop, "./data/agents".to_string());
+    // Create task manager
+    let task_manager = Arc::new(hypr_claw_tasks::TaskManager::with_state_file("./data/tasks/tasks.json"));
+    task_manager.restore().await?;
+    context.active_tasks = to_context_tasks(task_manager.list_tasks().await);
+    context_manager.save(&context).await?;
 
-    // Execute
+    // Run REPL loop
     println!("✅ System initialized");
-    println!("\n🤖 Executing task for user '{}' with agent '{}'...\n", user_id, agent_name);
+    println!("🤖 Agent '{}' ready for user '{}'\n", agent_name, user_id);
+    println!("🧠 Active soul: {}", active_soul_id);
+    let mut system_prompt = active_soul.system_prompt.clone();
     
-    match controller.execute(user_id, agent_name, &task).await {
-        Ok(response) => {
-            println!("\n╔══════════════════════════════════════════════════════════════════╗");
-            println!("║                         Response                                 ║");
-            println!("╚══════════════════════════════════════════════════════════════════╝");
-            println!("{}", response);
-            println!("\n✅ Task completed successfully");
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!("\n╔══════════════════════════════════════════════════════════════════╗");
-            eprintln!("║                          Error                                   ║");
-            eprintln!("╚══════════════════════════════════════════════════════════════════╝");
-            
-            match &e {
-                hypr_claw_runtime::RuntimeError::LLMError(msg) => {
-                    eprintln!("❌ LLM Error: {}", msg);
-                    if msg.contains("Authentication failed") || msg.contains("401") {
-                        eprintln!("\n💡 Tip: Run 'hypr-claw config reset' to reconfigure your API key");
-                    } else if msg.contains("Rate limited") || msg.contains("429") {
-                        eprintln!("\n💡 Tip: Wait a moment and try again");
-                    } else if msg.contains("404") || msg.contains("Invalid endpoint") {
-                        eprintln!("\n💡 Tip: Endpoint configuration error. Run 'hypr-claw config reset' to reconfigure");
-                    } else if msg.contains("service error") || msg.contains("5") {
-                        eprintln!("\n💡 Tip: The LLM service is experiencing issues. Try again later");
-                    } else if msg.contains("Network connection failed") {
-                        eprintln!("\n💡 Tip: Check your internet connection");
-                    } else {
-                        eprintln!("\n💡 Tip: Check that your LLM service is running and accessible");
+    println!("╔══════════════════════════════════════════════════════════════════╗");
+    println!("║              Hypr-Claw Agent REPL                                ║");
+    println!("║  Commands: exit, status, tasks, clear, soul switch <id>, approve ║");
+    println!("╚══════════════════════════════════════════════════════════════════╝");
+    println!();
+
+    // Setup graceful shutdown
+    let shutdown = Arc::new(tokio::sync::Notify::new());
+    let shutdown_clone = shutdown.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        shutdown_clone.notify_one();
+    });
+
+    loop {
+        tokio::select! {
+            _ = shutdown.notified() => {
+                println!("\n\n🛑 Shutting down gracefully...");
+                task_manager.cleanup_completed().await;
+                context.active_tasks = to_context_tasks(task_manager.list_tasks().await);
+                let _ = context_manager.save(&context).await;
+                println!("✅ Context saved. Goodbye!");
+                break;
+            }
+            result = async {
+                print!("hypr> ");
+                io::stdout().flush().ok();
+
+                let mut input = String::new();
+                io::stdin().read_line(&mut input).ok();
+                Some(input.trim().to_string())
+            } => {
+                let input = match result {
+                    Some(s) if !s.is_empty() => s,
+                    _ => continue,
+                };
+
+                match input.as_str() {
+                    "exit" | "quit" => {
+                        println!("👋 Goodbye!");
+                        break;
+                    }
+                    "help" => {
+                        println!("\n📖 Available Commands:");
+                        println!("  exit, quit  - Exit the agent");
+                        println!("  help        - Show this help message");
+                        println!("  status      - Show agent status");
+                        println!("  tasks       - List background tasks");
+                        println!("  clear       - Clear screen");
+                        println!("  soul switch <id> - Switch active soul profile");
+                        println!("  approve <task_id> - Approve pending action (reserved)");
+                        println!("\n💡 Enter any natural language command to execute\n");
+                        continue;
+                    }
+                    "status" => {
+                        println!("\n📊 Agent Status:");
+                        println!("  Session: {}", session_key);
+                        println!("  Agent ID: {}", agent_name);
+                        println!("  Active Soul: {}", active_soul_id);
+                        println!("  Status: Active");
+                        let task_list = task_manager.list_tasks().await;
+                        println!("  Active Tasks: {}", task_list.iter().filter(|t| t.status == hypr_claw_tasks::TaskStatus::Running).count());
+                        if let Some(plan) = &context.current_plan {
+                            println!("  Plan: {} [{}]", plan.goal, plan.status);
+                        }
+                        println!();
+                        continue;
+                    }
+                    "tasks" => {
+                        println!("\n📋 Background Tasks:");
+                        let task_list = task_manager.list_tasks().await;
+                        if task_list.is_empty() {
+                            println!("  No tasks running");
+                        } else {
+                            for task in &task_list {
+                                let status_icon = match task.status {
+                                    hypr_claw_tasks::TaskStatus::Running => "🔄",
+                                    hypr_claw_tasks::TaskStatus::Completed => "✅",
+                                    hypr_claw_tasks::TaskStatus::Failed => "❌",
+                                    hypr_claw_tasks::TaskStatus::Cancelled => "🚫",
+                                    _ => "⏸️",
+                                };
+                                println!("  {} {} - {} ({:.0}%)", status_icon, task.id, task.description, task.progress * 100.0);
+                            }
+                        }
+                        println!();
+                        context.active_tasks = to_context_tasks(task_list);
+                        context_manager.save(&context).await?;
+                        continue;
+                    }
+                    "clear" => {
+                        print!("\x1B[2J\x1B[1;1H");
+                        continue;
+                    }
+                    _ => {}
+                }
+
+                if let Some(soul_id) = input.strip_prefix("soul switch ").map(str::trim) {
+                    match load_soul_profile(soul_id).await {
+                        Ok(profile) => {
+                            let resolved = resolve_allowed_tools(&profile.allowed_tools, &agent_tools);
+                            if resolved.is_empty() {
+                                eprintln!("❌ Soul '{}' has no tools allowed after filtering", soul_id);
+                                continue;
+                            }
+                            runtime_registry.set_allowed_tools(resolved.clone());
+                            active_soul = profile;
+                            active_soul_id = soul_id.to_string();
+                            system_prompt = active_soul.system_prompt.clone();
+                            context.active_soul_id = active_soul_id.clone();
+                            context_manager.save(&context).await?;
+                            println!(
+                                "✅ Soul switched to '{}' ({} tools)",
+                                active_soul_id,
+                                resolved.len()
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("❌ Failed to switch soul: {}", e);
+                        }
+                    }
+                    continue;
+                }
+
+                if input.starts_with("approve ") {
+                    println!("ℹ️  Approval checks are inline. System-critical tools prompt immediately.");
+                    continue;
+                }
+
+                context.recent_history.push(hypr_claw_memory::types::HistoryEntry {
+                    timestamp: chrono::Utc::now().timestamp(),
+                    role: "user".to_string(),
+                    content: input.clone(),
+                    token_count: None,
+                });
+                context.current_plan = Some(plan_for_input(&input));
+                context_manager.save(&context).await?;
+
+                match agent_loop.run(&session_key, agent_name, &system_prompt, &input).await {
+                    Ok(response) => {
+                        context.recent_history.push(hypr_claw_memory::types::HistoryEntry {
+                            timestamp: chrono::Utc::now().timestamp(),
+                            role: "assistant".to_string(),
+                            content: response.clone(),
+                            token_count: None,
+                        });
+                        mark_plan_completed(&mut context, &response);
+                        context.active_tasks = to_context_tasks(task_manager.list_tasks().await);
+                        context_manager.save(&context).await?;
+                        println!("\n{}\n", response);
+                    }
+                    Err(e) => {
+                        mark_plan_failed(&mut context, &e.to_string());
+                        context_manager.save(&context).await?;
+                        eprintln!("❌ Error: {}\n", e);
                     }
                 }
-                hypr_claw_runtime::RuntimeError::ToolError(msg) => {
-                    eprintln!("❌ Tool Error: {}", msg);
-                }
-                hypr_claw_runtime::RuntimeError::LockError(msg) => {
-                    eprintln!("❌ Lock Error: {}", msg);
-                    eprintln!("\n💡 Tip: Another session may be active. Wait 30 seconds and try again");
-                }
-                hypr_claw_runtime::RuntimeError::SessionError(msg) => {
-                    eprintln!("❌ Session Error: {}", msg);
-                    eprintln!("\n💡 Tip: Check disk space and permissions in ./data/sessions");
-                }
-                hypr_claw_runtime::RuntimeError::ConfigError(msg) => {
-                    eprintln!("❌ Config Error: {}", msg);
-                    eprintln!("\n💡 Tip: Check that ./data/agents/{}.yaml exists", agent_name);
-                }
-                _ => {
-                    eprintln!("❌ Error: {}", e);
-                }
             }
-            
-            Err(Box::new(e) as Box<dyn std::error::Error>)
         }
     }
+
+    context.active_tasks = to_context_tasks(task_manager.list_tasks().await);
+    context_manager.save(&context).await?;
+    
+    Ok(())
 }
 
 fn handle_config_reset() -> Result<(), Box<dyn std::error::Error>> {
@@ -349,6 +475,8 @@ fn initialize_directories() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all("./data/sessions")?;
     std::fs::create_dir_all("./data/credentials")?;
     std::fs::create_dir_all("./data/agents")?;
+    std::fs::create_dir_all("./data/context")?;
+    std::fs::create_dir_all("./data/tasks")?;
     
     if !std::path::Path::new("./data/audit.log").exists() {
         std::fs::File::create("./data/audit.log")?;
@@ -363,18 +491,153 @@ fn initialize_directories() -> Result<(), Box<dyn std::error::Error>> {
     if !std::path::Path::new(default_agent_config).exists() {
         std::fs::write(
             default_agent_config,
-            "id: default\nsoul: default_soul.md\ntools:\n  - echo\n  - file_read\n  - file_write\n  - file_list\n  - shell_exec\n"
+            "id: default\nsoul: default_soul.md\ntools:\n  - echo\n  - fs.read\n  - fs.write\n  - fs.list\n  - fs.create_dir\n  - fs.move\n  - fs.copy\n  - fs.delete\n  - hypr.workspace.switch\n  - hypr.exec\n  - proc.spawn\n  - proc.list\n  - wallpaper.set\n"
         )?;
     }
     
     if !std::path::Path::new(default_agent_soul).exists() {
         std::fs::write(
             default_agent_soul,
-            "You are a helpful assistant with access to file operations and shell commands."
+            "You are a local OS assistant. Use structured tools for every system action."
         )?;
     }
 
     Ok(())
+}
+
+struct SoulProfile {
+    system_prompt: String,
+    allowed_tools: Vec<String>,
+    max_iterations: usize,
+}
+
+async fn load_soul_profile(soul_id: &str) -> Result<SoulProfile, Box<dyn std::error::Error>> {
+    let path = format!("./souls/{}.yaml", soul_id);
+    let soul = hypr_claw_policy::Soul::load(path).await?;
+    Ok(SoulProfile {
+        system_prompt: soul.system_prompt,
+        allowed_tools: soul
+            .config
+            .allowed_tools
+            .into_iter()
+            .map(|t| normalize_tool_name(&t))
+            .collect(),
+        max_iterations: soul.config.max_iterations,
+    })
+}
+
+fn load_agent_tool_set(config_path: &str) -> HashSet<String> {
+    match hypr_claw_runtime::load_agent_config(config_path) {
+        Ok(config) => config
+            .tools
+            .into_iter()
+            .map(|t| normalize_tool_name(&t))
+            .collect(),
+        Err(_) => HashSet::new(),
+    }
+}
+
+fn resolve_allowed_tools(soul_allowed: &[String], agent_allowed: &HashSet<String>) -> HashSet<String> {
+    let soul_set: HashSet<String> = soul_allowed
+        .iter()
+        .map(|t| normalize_tool_name(t))
+        .collect();
+
+    if agent_allowed.is_empty() {
+        return soul_set;
+    }
+    if soul_set.is_empty() {
+        return agent_allowed.clone();
+    }
+
+    soul_set
+        .into_iter()
+        .filter(|tool| agent_allowed.contains(tool))
+        .collect()
+}
+
+fn normalize_tool_name(name: &str) -> String {
+    match name {
+        "file_read" | "file.read" => "fs.read".to_string(),
+        "file_write" | "file.write" => "fs.write".to_string(),
+        "file_list" | "file.list" => "fs.list".to_string(),
+        "shell_exec" | "shell.exec" => "hypr.exec".to_string(),
+        "process_list" => "proc.list".to_string(),
+        "process_spawn" => "proc.spawn".to_string(),
+        "system_info" => "system.memory".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn to_context_tasks(task_list: Vec<hypr_claw_tasks::TaskInfo>) -> Vec<hypr_claw_memory::types::TaskState> {
+    task_list
+        .into_iter()
+        .map(|task| hypr_claw_memory::types::TaskState {
+            id: task.id,
+            description: task.description,
+            status: format!("{:?}", task.status).to_lowercase(),
+            progress: task.progress,
+            created_at: task.created_at,
+            updated_at: task.updated_at,
+        })
+        .collect()
+}
+
+fn plan_for_input(goal: &str) -> hypr_claw_memory::types::PlanState {
+    hypr_claw_memory::types::PlanState {
+        goal: goal.to_string(),
+        steps: vec![
+            hypr_claw_memory::types::PlanStepState {
+                id: 0,
+                description: "Analyze request".to_string(),
+                status: "completed".to_string(),
+                result: Some("Intent parsed".to_string()),
+            },
+            hypr_claw_memory::types::PlanStepState {
+                id: 1,
+                description: "Execute required tools".to_string(),
+                status: "in_progress".to_string(),
+                result: None,
+            },
+            hypr_claw_memory::types::PlanStepState {
+                id: 2,
+                description: "Report completion".to_string(),
+                status: "pending".to_string(),
+                result: None,
+            },
+        ],
+        current_step: 1,
+        status: "in_progress".to_string(),
+        updated_at: chrono::Utc::now().timestamp(),
+    }
+}
+
+fn mark_plan_completed(context: &mut hypr_claw_memory::types::ContextData, response: &str) {
+    if let Some(plan) = &mut context.current_plan {
+        if let Some(step) = plan.steps.get_mut(1) {
+            step.status = "completed".to_string();
+            step.result = Some("Tool execution completed".to_string());
+        }
+        if let Some(step) = plan.steps.get_mut(2) {
+            step.status = "completed".to_string();
+            step.result = Some(response.to_string());
+        }
+        plan.current_step = plan.steps.len();
+        plan.status = "completed".to_string();
+        plan.updated_at = chrono::Utc::now().timestamp();
+    }
+}
+
+fn mark_plan_failed(context: &mut hypr_claw_memory::types::ContextData, error: &str) {
+    if let Some(plan) = &mut context.current_plan {
+        let step_index = plan.current_step.min(plan.steps.len().saturating_sub(1));
+        if let Some(step) = plan.steps.get_mut(step_index) {
+            step.status = "failed".to_string();
+            step.result = Some(error.to_string());
+        }
+        plan.status = "failed".to_string();
+        plan.updated_at = chrono::Utc::now().timestamp();
+    }
 }
 
 // Adapter for ToolDispatcher
@@ -388,22 +651,18 @@ impl RuntimeDispatcherAdapter {
     }
 }
 
+#[async_trait::async_trait]
 impl hypr_claw_runtime::ToolDispatcher for RuntimeDispatcherAdapter {
-    fn execute(
+    async fn execute(
         &self,
         tool_name: &str,
         input: &serde_json::Value,
         session_key: &str,
     ) -> Result<serde_json::Value, hypr_claw_runtime::RuntimeError> {
-        let inner = self.inner.clone();
-        let tool_name = tool_name.to_string();
-        let input = input.clone();
-        let session_key = session_key.to_string();
-
-        let handle = tokio::runtime::Handle::current();
-        let result = handle.block_on(async move {
-            inner.dispatch(session_key, tool_name, input).await
-        });
+        let result = self
+            .inner
+            .dispatch(session_key.to_string(), tool_name.to_string(), input.clone())
+            .await;
 
         match result {
             Ok(tool_result) => {
@@ -423,17 +682,51 @@ impl hypr_claw_runtime::ToolDispatcher for RuntimeDispatcherAdapter {
 // Adapter for ToolRegistry
 struct RuntimeRegistryAdapter {
     inner: Arc<hypr_claw_tools::ToolRegistryImpl>,
+    allowed_tools: Arc<RwLock<HashSet<String>>>,
 }
 
 impl RuntimeRegistryAdapter {
-    fn new(inner: Arc<hypr_claw_tools::ToolRegistryImpl>) -> Self {
-        Self { inner }
+    fn new(inner: Arc<hypr_claw_tools::ToolRegistryImpl>, allowed_tools: Arc<RwLock<HashSet<String>>>) -> Self {
+        Self { inner, allowed_tools }
+    }
+
+    fn set_allowed_tools(&self, allowed_tools: HashSet<String>) {
+        if let Ok(mut guard) = self.allowed_tools.write() {
+            *guard = allowed_tools;
+        }
     }
 }
 
 impl hypr_claw_runtime::ToolRegistry for RuntimeRegistryAdapter {
     fn get_active_tools(&self, _agent_id: &str) -> Vec<String> {
-        self.inner.list()
+        let allowed = self.allowed_tools.read().ok();
+        let Some(allowed) = allowed else {
+            return Vec::new();
+        };
+        self.inner
+            .list()
+            .into_iter()
+            .filter(|name| allowed.contains(name))
+            .collect()
+    }
+    
+    fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
+        let allowed = self.allowed_tools.read().ok();
+        let Some(allowed) = allowed else {
+            return Vec::new();
+        };
+        self.inner
+            .schemas()
+            .into_iter()
+            .filter(|schema| {
+                schema
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .map(|name| allowed.contains(name))
+                    .unwrap_or(false)
+            })
+            .collect()
     }
 }
 

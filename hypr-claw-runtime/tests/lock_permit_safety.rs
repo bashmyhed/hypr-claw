@@ -91,8 +91,9 @@ impl LockManager for AuditLockManager {
 
 struct AuditToolDispatcher;
 
+#[async_trait]
 impl ToolDispatcher for AuditToolDispatcher {
-    fn execute(
+    async fn execute(
         &self,
         tool_name: &str,
         _input: &serde_json::Value,
@@ -104,8 +105,9 @@ impl ToolDispatcher for AuditToolDispatcher {
 
 struct FailingToolDispatcher;
 
+#[async_trait]
 impl ToolDispatcher for FailingToolDispatcher {
-    fn execute(
+    async fn execute(
         &self,
         _tool_name: &str,
         _input: &serde_json::Value,
@@ -121,6 +123,25 @@ impl ToolRegistry for AuditToolRegistry {
     fn get_active_tools(&self, _agent_id: &str) -> Vec<String> {
         vec![]
     }
+
+        fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
+            vec![
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": "echo",
+                        "description": "Echo a message",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "message": {"type": "string"}
+                            },
+                            "required": ["message"]
+                        }
+                    }
+                })
+            ]
+        }
 }
 
 struct AuditSummarizer;

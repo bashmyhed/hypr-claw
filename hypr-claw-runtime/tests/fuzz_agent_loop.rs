@@ -2,7 +2,6 @@
 //! Property-based fuzzing tests for agent loop.
 
 use hypr_claw_runtime::*;
-use hypr_claw_runtime::LLMClientType;
 use proptest::prelude::*;
 use serde_json::json;
 

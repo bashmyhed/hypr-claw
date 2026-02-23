@@ -1,0 +1,77 @@
+{
+  "session_id": "local_user:default",
+  "active_soul_id": "safe_assistant",
+  "system_state": {},
+  "facts": [],
+  "recent_history": [
+    {
+      "timestamp": 1771856464,
+      "role": "user",
+      "content": "hi",
+      "token_count": null
+    },
+    {
+      "timestamp": 1771856508,
+      "role": "user",
+      "content": "change wallpaer slelectign sometinng ramdong from dwnloads",
+      "token_count": null
+    },
+    {
+      "timestamp": 1771856511,
+      "role": "assistant",
+      "content": "I am sorry, but I cannot change the wallpaper. My capabilities are limited to file system operations, echoing messages, and listing processes.",
+      "token_count": null
+    },
+    {
+      "timestamp": 1771856527,
+      "role": "user",
+      "content": "open vs code",
+      "token_count": null
+    }
+  ],
+  "long_term_summary": "",
+  "active_tasks": [],
+  "current_plan": {
+    "goal": "open vs code",
+    "steps": [
+      {
+        "id": 0,
+        "description": "Analyze request",
+        "status": "completed",
+        "result": "Intent parsed"
+      },
+      {
+        "id": 1,
+        "description": "Execute required tools",
+        "status": "failed",
+        "result": "Tool error: Tool invocation required but not performed"
+      },
+      {
+        "id": 2,
+        "description": "Report completion",
+        "status": "pending",
+        "result": null
+      }
+    ],
+    "current_step": 1,
+    "status": "failed",
+    "updated_at": 1771856529
+  },
+  "approval_history": [],
+  "pending_approvals": [],
+  "tool_stats": {
+    "total_calls": 0,
+    "by_tool": {},
+    "failures": 0
+  },
+  "last_known_environment": {
+    "workspace": "",
+    "last_update": 0,
+    "system_snapshot": null
+  },
+  "token_usage": {
+    "total_input": 0,
+    "total_output": 0,
+    "by_session": 0
+  }
+}

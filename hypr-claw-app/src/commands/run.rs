@@ -2,6 +2,7 @@ use anyhow::{Result, Context};
 use std::sync::Arc;
 use std::time::Duration;
 use crate::config::Config;
+use serde_json::json;
 
 pub async fn run(agent: &str, user: &str, message: &str) -> Result<()> {
     println!("🤖 Running agent: {}", agent);
@@ -158,4 +159,23 @@ impl hypr_claw_runtime::ToolRegistry for MockToolRegistry {
     fn get_active_tools(&self, _agent_id: &str) -> Vec<String> {
         vec!["echo".to_string()]
     }
+
+        fn get_tool_schemas(&self, _agent_id: &str) -> Vec<serde_json::Value> {
+            vec![
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": "echo",
+                        "description": "Echo a message",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "message": {"type": "string"}
+                            },
+                            "required": ["message"]
+                        }
+                    }
+                })
+            ]
+        }
 }

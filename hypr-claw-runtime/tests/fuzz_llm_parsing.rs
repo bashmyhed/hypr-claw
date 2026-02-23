@@ -3,7 +3,6 @@
 #![allow(clippy::unwrap_used)]
 
 use hypr_claw_runtime::LLMResponse;
-use hypr_claw_runtime::LLMClientType;
 use proptest::prelude::*;
 use serde_json::json;
 
