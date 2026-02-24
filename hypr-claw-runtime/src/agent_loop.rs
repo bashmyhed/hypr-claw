@@ -209,25 +209,8 @@ where
         for iteration in 0..max_iterations {
             debug!("LLM loop iteration {}/{}", iteration + 1, max_iterations);
 
-            // Call LLM with reinforced prompt and progress indicator
+            // Call LLM with reinforced prompt
             let llm_start = std::time::Instant::now();
-
-            // Spawn progress indicator task
-            let progress_handle = tokio::spawn(async move {
-                let mut dots = 0;
-                loop {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                    dots = (dots + 1) % 4;
-                    let dot_str = ".".repeat(dots);
-                    eprint!(
-                        "\r\x1B[K🤔 Calling LLM (iteration {}/{}){}   ",
-                        iteration + 1,
-                        max_iterations,
-                        dot_str
-                    );
-                    std::io::Write::flush(&mut std::io::stderr()).ok();
-                }
-            });
 
             let response = self
                 .llm_client
@@ -238,18 +221,8 @@ where
                     e
                 })?;
 
-            // Stop progress indicator
-            progress_handle.abort();
-
             let llm_duration = llm_start.elapsed();
             info!("LLM call took {:?}", llm_duration);
-            eprint!(
-                "\r\x1B[K🔧 Processing response (iteration {}/{})... (LLM took {:.1}s)",
-                iteration + 1,
-                max_iterations,
-                llm_duration.as_secs_f32()
-            );
-            std::io::Write::flush(&mut std::io::stderr()).ok();
 
             // Handle response type
             match response {
@@ -276,12 +249,6 @@ where
                 } => {
                     saw_tool_call = true;
                     tool_call_count += 1;
-                    eprint!(
-                        "\r\x1B[K🔧 Executing tool: {} with input: {}...",
-                        tool_name,
-                        serde_json::to_string(&input).unwrap_or_default()
-                    );
-                    std::io::Write::flush(&mut std::io::stderr()).ok();
                     info!(
                         "Executing tool: {} (iteration {})",
                         tool_name,

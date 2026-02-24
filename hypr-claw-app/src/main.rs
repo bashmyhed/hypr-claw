@@ -27,12 +27,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return handle_config_reset();
     }
 
-    // Print banner
-    println!("╔══════════════════════════════════════════════════════════════════╗");
-    println!("║              Hypr-Claw Terminal Agent                            ║");
-    println!("╚══════════════════════════════════════════════════════════════════╝");
-    println!();
-
     // Initialize directories
     if let Err(e) = initialize_directories() {
         eprintln!("❌ Failed to initialize directories: {}", e);
@@ -74,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("ℹ️  NVIDIA default model set to {}", config.model);
     }
 
-    // Display provider info
+    // Provider info
     let provider_name = match &config.provider {
         LLMProvider::Nvidia => "NVIDIA Kimi",
         LLMProvider::Google => "Google Gemini",
@@ -83,9 +77,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         LLMProvider::GeminiCli => "Gemini CLI",
         LLMProvider::Codex => "OpenAI Codex (ChatGPT Plus/Pro)",
     };
-    println!("Using provider: {}", provider_name);
-    println!("Model: {}", config.model);
-    println!();
 
     if !config.provider.supports_function_calling() {
         eprintln!(
@@ -98,8 +89,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let agent_name = detect_agent_name();
     let user_id = detect_user_id();
-    println!("Agent profile: {}", agent_name);
-    println!("User identity: {}", user_id);
     let session_key = format!("{}:{}", user_id, agent_name);
 
     let context_manager = hypr_claw_memory::ContextManager::new("./data/context");
@@ -341,7 +330,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     context_manager.save(&context).await?;
 
     // Run REPL loop
-    println!("✅ System initialized");
     let system_prompt = active_soul.system_prompt.clone();
 
     print_console_bootstrap(
@@ -670,8 +658,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .filter(|t| t.status == hypr_claw_tasks::TaskStatus::Running)
                     .count();
                 let prompt = format!(
-                    "hypr[{}|{}|run:{}]> ",
-                    agent_state.active_thread_id,
+                    "hc[{}|{}|{}]> ",
+                    truncate_for_table(&agent_state.active_thread_id, 12),
                     short_model_name(&config.model),
                     running_tasks
                 );
@@ -680,7 +668,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let mut input = String::new();
                 io::stdin().read_line(&mut input).ok();
-                let line = input.trim().to_string();
+                let line = sanitize_single_line(input.trim());
                 if line.is_empty() {
                     UiInputEvent::Skip
                 } else {
@@ -1802,31 +1790,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 agent_state.reliability.last_break_reason.clear();
                 agent_state.reliability.updated_at = Some(chrono::Utc::now().timestamp());
 
-                println!();
-                println!(
-                    "{}",
-                    ui_accent("──────────────────────────── Run ────────────────────────────")
-                );
-                println!(
-                    "prompt   : {}",
-                    truncate_for_table(&effective_input.replace('\n', " "), 120)
-                );
-                println!(
-                    "mode     : power  class={}  iter={}  timeout={}s  model={}",
+                print_run_panel(
+                    &effective_input,
                     task_class.as_str(),
                     agent_loop.max_iterations(),
                     watchdog_timeout.as_secs(),
-                    short_model_name(&config.model)
-                );
-                println!("thinking : observe -> pick best tool -> verify -> continue");
-                println!(
-                    "tools    : {} active{}",
+                    &config.model,
                     active_allowed_tools.len(),
                     if use_focused {
-                        format!(" (focused to {})", focused_tools.len())
+                        Some(focused_tools.len())
                     } else {
-                        String::new()
-                    }
+                        None
+                    },
                 );
 
                 let turn_system_prompt = augment_system_prompt_for_turn(
@@ -2060,8 +2035,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         context_manager.save(&context).await?;
                         if transcript_view_mode {
                             let tool_rows = action_feed_since(&action_feed, run_action_start, 20);
-                            let mut result_rows = vec![format!("ok: completed in {}ms", run_elapsed_ms)];
-                            result_rows.extend(text_preview_lines(&response, 6, 112));
+                            let mut result_rows =
+                                vec![format!("status: completed in {}ms", run_elapsed_ms)];
+                            result_rows.push(format!("tool_events: {}", tool_rows.len()));
+                            if !recovery_notes.is_empty() {
+                                result_rows.push(format!(
+                                    "recovery_attempts: {}",
+                                    recovery_notes.len()
+                                ));
+                            }
                             print_transcript_panes(
                                 &effective_input,
                                 &config.model,
@@ -2072,11 +2054,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &result_rows,
                             );
                         }
-                        println!(
-                            "{}",
-                            ui_accent("────────────────────────── Response ──────────────────────────")
-                        );
-                        println!("{}\n", response);
+                        println!();
+                        println!("{}", ui_section("Assistant"));
+                        println!("{}\n", strip_ansi_and_controls(&response));
                     }
                     Err(e) => {
                         let error_msg = e.to_string();
@@ -2127,10 +2107,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if transcript_view_mode {
                             let tool_rows = action_feed_since(&action_feed, run_action_start, 20);
                             let mut result_rows = vec![format!(
-                                "failed: {} in {}ms",
+                                "status: failed {} in {}ms",
                                 stop_code, run_elapsed_ms
                             )];
-                            result_rows.extend(text_preview_lines(&error_msg, 4, 112));
+                            result_rows.extend(text_preview_lines(&error_msg, 2, 112));
                             if !hint.is_empty() {
                                 result_rows.push(format!("next: {}", &hint));
                             }
@@ -2577,6 +2557,17 @@ fn ui_danger(text: &str) -> String {
     paint(text, UI_DANGER)
 }
 
+fn ui_divider() -> String {
+    ui_accent(&"─".repeat(78))
+}
+
+fn ui_section(title: &str) -> String {
+    let mut line = format!("─ {} ", title);
+    let fill = 78usize.saturating_sub(line.chars().count());
+    line.push_str(&"─".repeat(fill));
+    ui_accent(&line)
+}
+
 fn status_badge(status: &hypr_claw_tasks::TaskStatus) -> String {
     match status {
         hypr_claw_tasks::TaskStatus::Running => ui_info("RUN"),
@@ -2618,18 +2609,82 @@ fn truncate_for_table(value: &str, max: usize) -> String {
     out
 }
 
+fn strip_ansi_and_controls(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if bytes[i] == 0x1B {
+            i += 1;
+            if i >= bytes.len() {
+                break;
+            }
+            match bytes[i] {
+                b'[' => {
+                    i += 1;
+                    while i < bytes.len() {
+                        let b = bytes[i];
+                        i += 1;
+                        if (0x40..=0x7E).contains(&b) {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                b']' => {
+                    i += 1;
+                    while i < bytes.len() {
+                        if bytes[i] == 0x07 {
+                            i += 1;
+                            break;
+                        }
+                        if bytes[i] == 0x1B && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                            i += 2;
+                            break;
+                        }
+                        i += 1;
+                    }
+                    continue;
+                }
+                _ => continue,
+            }
+        }
+
+        let rest = &raw[i..];
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        i += ch.len_utf8();
+        if ch.is_control() && ch != '\n' && ch != '\t' {
+            continue;
+        }
+        out.push(ch);
+    }
+
+    out
+}
+
+fn sanitize_single_line(raw: &str) -> String {
+    strip_ansi_and_controls(raw)
+        .replace('\n', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn sanitize_user_input_line(raw: &str) -> String {
-    let mut value = raw.trim().to_string();
+    let mut value = sanitize_single_line(raw.trim());
     for _ in 0..4 {
         if let Some(rest) = value.strip_prefix("tui> ") {
-            value = rest.trim().to_string();
+            value = sanitize_single_line(rest.trim());
             continue;
         }
         if value.starts_with("hypr[") {
             if let Some((_, rest)) = value.rsplit_once("]>") {
                 let cleaned = rest.trim();
                 if !cleaned.is_empty() {
-                    value = cleaned.to_string();
+                    value = sanitize_single_line(cleaned);
                     continue;
                 }
             }
@@ -2648,57 +2703,66 @@ fn print_console_bootstrap(
     session_key: &str,
     active_thread_id: &str,
 ) {
+    println!("{}", ui_section("Hypr-Claw"));
     println!(
-        "{}",
-        ui_accent("╔════════════════════════════════════════════════════════════════════╗")
+        "{} {}  {} {}  {} {}",
+        ui_dim("provider"),
+        ui_info(&truncate_for_table(provider_name, 20)),
+        ui_dim("model"),
+        ui_info(&truncate_for_table(&short_model_name(model), 24)),
+        ui_dim("session"),
+        truncate_for_table(session_key, 26)
     );
     println!(
-        "{}",
-        ui_title("║                  Hypr-Claw OS Assistant Console                   ║")
+        "{} {}  {} {}  {} {}",
+        ui_dim("user"),
+        truncate_for_table(&format!("{} ({})", display_name, user_id), 24),
+        ui_dim("agent"),
+        truncate_for_table(agent_name, 16),
+        ui_dim("thread"),
+        truncate_for_table(active_thread_id, 14)
     );
     println!(
-        "{}",
-        ui_accent("╠════════════════════════════════════════════════════════════════════╣")
-    );
-    println!(
-        "║ Provider : {:<54} ║",
-        truncate_for_table(provider_name, 54)
-    );
-    println!("║ Model    : {:<54} ║", truncate_for_table(model, 54));
-    println!(
-        "║ User     : {:<54} ║",
-        truncate_for_table(&format!("{} ({})", display_name, user_id), 54)
-    );
-    println!("║ Session  : {:<54} ║", truncate_for_table(session_key, 54));
-    println!(
-        "║ Profile  : {:<54} ║",
+        "{} {}",
+        ui_dim("commands"),
         truncate_for_table(
-            &format!(
-                "agent={}  mode=power  thread={}",
-                agent_name, active_thread_id
-            ),
-            54
+            "help  status  scan  capabilities  /models  tasks  queue add/run/status/clear  view",
+            64
         )
     );
-    println!(
-        "{}",
-        ui_accent("╠════════════════════════════════════════════════════════════════════╣")
-    );
-    println!(
-        "{}",
-        ui_dim(&format!(
-            "║ Commands: {:<58}║",
-            truncate_for_table(
-                "help, status, scan, capabilities, /models, tasks, queue add/run/status/clear...",
-                58
-            )
-        ))
-    );
-    println!(
-        "{}",
-        ui_accent("╚════════════════════════════════════════════════════════════════════╝")
-    );
+    println!("{}", ui_divider());
     println!();
+}
+
+fn print_run_panel(
+    prompt: &str,
+    class_label: &str,
+    max_iterations: usize,
+    timeout_secs: u64,
+    model: &str,
+    active_tools: usize,
+    focused_tools: Option<usize>,
+) {
+    println!();
+    println!("{}", ui_section("Run"));
+    println!(
+        "{} {}",
+        ui_dim("goal"),
+        truncate_for_table(&sanitize_single_line(prompt), 112)
+    );
+    println!(
+        "{} power  {}  iter={}  timeout={}s  model={}",
+        ui_dim("plan"),
+        class_label,
+        max_iterations,
+        timeout_secs,
+        short_model_name(model)
+    );
+    println!("{} observe -> plan -> execute -> verify", ui_dim("flow"));
+    let focused = focused_tools
+        .map(|count| format!(" (focused {})", count))
+        .unwrap_or_default();
+    println!("{} {} active{}", ui_dim("tools"), active_tools, focused);
 }
 
 fn print_help() {
@@ -2752,15 +2816,16 @@ fn text_preview_lines(text: &str, max_lines: usize, max_width: usize) -> Vec<Str
     if text.trim().is_empty() {
         return vec!["(empty)".to_string()];
     }
+    let sanitized = strip_ansi_and_controls(text);
     let mut lines = Vec::new();
-    for line in text.lines().take(max_lines) {
-        lines.push(truncate_for_table(line.trim(), max_width));
+    for line in sanitized.lines().take(max_lines) {
+        lines.push(truncate_for_table(&sanitize_single_line(line), max_width));
     }
-    if text.lines().count() > max_lines {
+    if sanitized.lines().count() > max_lines {
         lines.push(format!("... (truncated, {}+ lines)", max_lines));
     }
     if lines.is_empty() {
-        lines.push(truncate_for_table(text.trim(), max_width));
+        lines.push(truncate_for_table(&sanitize_single_line(&sanitized), max_width));
     }
     lines
 }
@@ -2774,47 +2839,59 @@ fn print_transcript_panes(
     recovery_rows: &[String],
     result_rows: &[String],
 ) {
+    println!("{}", ui_section("Transcript"));
     println!(
-        "{}",
-        ui_accent("─────────────────────── Live Transcript ───────────────────────")
-    );
-    println!(
-        "{} {} | {} {} | {} {}ms",
-        ui_dim("model:"),
+        "{} {}  {} {}  {} {}ms",
+        ui_dim("model"),
         ui_info(&short_model_name(model)),
-        ui_dim("class:"),
+        ui_dim("class"),
         ui_info(class_label),
-        ui_dim("elapsed:"),
-        run_elapsed_ms
+        ui_dim("elapsed"),
+        ui_info(&run_elapsed_ms.to_string())
     );
-    println!("{}", ui_title("Prompt"));
-    for row in text_preview_lines(prompt, 4, 118) {
-        println!("  {}", row);
+    let prompt_rows = text_preview_lines(prompt, 2, 104);
+    if let Some(first) = prompt_rows.first() {
+        println!("{} {}", ui_dim("prompt"), first);
     }
-    println!("{}", ui_title("Tools"));
+    for row in prompt_rows.iter().skip(1) {
+        println!("{} {}", ui_dim("      "), row);
+    }
     if tool_rows.is_empty() {
-        println!("  {}", ui_dim("(no tool calls)"));
+        println!("{} {}", ui_dim("tools "), ui_dim("(no tool calls)"));
     } else {
+        let mut first = true;
         for row in tool_rows {
-            println!("  {}", truncate_for_table(row, 118));
+            if first {
+                println!("{} {}", ui_dim("tools "), truncate_for_table(row, 104));
+                first = false;
+            } else {
+                println!("{} {}", ui_dim("      "), truncate_for_table(row, 104));
+            }
         }
     }
-    println!("{}", ui_title("Recovery"));
     if recovery_rows.is_empty() {
-        println!("  {}", ui_dim("(none)"));
+        println!("{} {}", ui_dim("retry "), ui_dim("(none)"));
     } else {
+        let mut first = true;
         for row in recovery_rows {
-            println!("  {}", truncate_for_table(row, 118));
+            if first {
+                println!("{} {}", ui_dim("retry "), truncate_for_table(row, 104));
+                first = false;
+            } else {
+                println!("{} {}", ui_dim("      "), truncate_for_table(row, 104));
+            }
         }
     }
-    println!("{}", ui_title("Result"));
+    let mut first = true;
     for row in result_rows {
-        println!("  {}", truncate_for_table(row, 118));
+        if first {
+            println!("{} {}", ui_dim("result"), truncate_for_table(row, 104));
+            first = false;
+        } else {
+            println!("{} {}", ui_dim("      "), truncate_for_table(row, 104));
+        }
     }
-    println!(
-        "{}",
-        ui_accent("────────────────────────────────────────────────────────────────")
-    );
+    println!("{}", ui_divider());
 }
 
 fn print_tasks_panel(task_list: &[hypr_claw_tasks::TaskInfo]) {
@@ -5503,15 +5580,31 @@ impl RuntimeDispatcherAdapter {
         tool_name: &str,
         detail: &str,
     ) {
+        let tool = truncate_for_table(tool_name, 30);
+        let detail_clean = truncate_for_table(&sanitize_single_line(detail), 108);
         let line = format!(
-            "[{:>3}] {:<8} {:<32} {}",
+            "{:>3}. {:<7} {:<30} {}",
             index,
             status,
-            truncate_for_table(tool_name, 32),
-            detail
+            tool,
+            detail_clean
         );
         self.push_action(session_key, line.clone());
-        println!("{line}");
+        let status_badge = match status {
+            "ok" => ui_success("OK"),
+            "tool" => ui_info("TOOL"),
+            "alias" => ui_warn("MAP"),
+            "fail" => ui_danger("FAIL"),
+            "error" => ui_danger("ERR"),
+            _ => ui_dim(status),
+        };
+        println!(
+            "{} {} {} {}",
+            ui_dim(&format!("{:>3}.", index)),
+            status_badge,
+            truncate_for_table(tool_name, 30),
+            detail_clean
+        );
     }
 }
 
@@ -6225,6 +6318,21 @@ mod reliability_policy_tests {
         );
         assert_eq!(RuntimeDispatcherAdapter::task_tag("user:agent"), None);
         assert_eq!(RuntimeDispatcherAdapter::task_tag(""), None);
+    }
+
+    #[test]
+    fn sanitize_single_line_strips_ansi_and_controls() {
+        let raw = "hello\u{1b}[31m red\u{1b}[0m world\u{0008}";
+        let cleaned = sanitize_single_line(raw);
+        assert_eq!(cleaned, "hello red world");
+        assert!(!cleaned.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn sanitize_user_input_removes_prompt_wrappers() {
+        let raw = "hypr[task-1|glm4.7|run:0]> open mail\u{1b}[D";
+        let cleaned = sanitize_user_input_line(raw);
+        assert_eq!(cleaned, "open mail");
     }
 
     #[test]
