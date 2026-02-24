@@ -101,9 +101,9 @@ fn test_tool_schemas_format() {
     let wallpaper_tool = schemas
         .iter()
         .find(|s| s["function"]["name"] == "set_wallpaper");
-    
+
     assert!(wallpaper_tool.is_some(), "set_wallpaper tool not found");
-    
+
     if let Some(tool) = wallpaper_tool {
         assert_eq!(
             tool["function"]["description"],

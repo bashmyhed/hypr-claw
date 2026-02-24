@@ -108,7 +108,7 @@ impl Default for ContextData {
     fn default() -> Self {
         Self {
             session_id: String::new(),
-            active_soul_id: "safe_assistant".to_string(),
+            active_soul_id: "power_agent".to_string(),
             system_state: serde_json::json!({}),
             facts: Vec::new(),
             recent_history: Vec::new(),

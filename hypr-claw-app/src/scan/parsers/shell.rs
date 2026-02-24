@@ -156,7 +156,10 @@ fn parse_fish_config(content: &str) -> Value {
 
         // Fish functions: function name
         if trimmed.starts_with("function ") {
-            if let Some(func_name) = trimmed.strip_prefix("function ").and_then(|s| s.split_whitespace().next()) {
+            if let Some(func_name) = trimmed
+                .strip_prefix("function ")
+                .and_then(|s| s.split_whitespace().next())
+            {
                 functions.push(func_name.to_string());
             }
         }
@@ -173,47 +176,61 @@ fn parse_fish_config(content: &str) -> Value {
 fn parse_alias(line: &str) -> Option<(String, String)> {
     // Parse: alias name='command' or alias name="command" or alias name command
     let line = line.strip_prefix("alias ")?.trim();
-    
+
     // Try with = first (bash/zsh style)
     if let Some((name, cmd)) = line.split_once('=') {
         let name = name.trim().to_string();
-        let cmd = cmd.trim().trim_matches(|c| c == '\'' || c == '"').to_string();
+        let cmd = cmd
+            .trim()
+            .trim_matches(|c| c == '\'' || c == '"')
+            .to_string();
         return Some((name, cmd));
     }
-    
+
     // Try fish style: alias name 'command' or alias name command
     if let Some((name, cmd)) = line.split_once(' ') {
         let name = name.trim().to_string();
-        let cmd = cmd.trim().trim_matches(|c| c == '\'' || c == '"').to_string();
+        let cmd = cmd
+            .trim()
+            .trim_matches(|c| c == '\'' || c == '"')
+            .to_string();
         return Some((name, cmd));
     }
-    
+
     None
 }
 
 fn parse_export(line: &str) -> Option<(String, String)> {
     // Parse: export VAR=value or export VAR="value"
     let line = line.strip_prefix("export ")?.trim();
-    
+
     if let Some((var, value)) = line.split_once('=') {
         let var = var.trim().to_string();
-        let value = value.trim().trim_matches(|c| c == '\'' || c == '"').to_string();
+        let value = value
+            .trim()
+            .trim_matches(|c| c == '\'' || c == '"')
+            .to_string();
         return Some((var, value));
     }
-    
+
     None
 }
 
 fn parse_fish_export(line: &str) -> Option<(String, String)> {
     // Parse: set -x VAR value or set --export VAR value
-    let line = line.strip_prefix("set -x ")
+    let line = line
+        .strip_prefix("set -x ")
         .or_else(|| line.strip_prefix("set --export "))?
         .trim();
-    
+
     let mut parts = line.splitn(2, ' ');
     let var = parts.next()?.trim().to_string();
-    let value = parts.next()?.trim().trim_matches(|c| c == '\'' || c == '"').to_string();
-    
+    let value = parts
+        .next()?
+        .trim()
+        .trim_matches(|c| c == '\'' || c == '"')
+        .to_string();
+
     Some((var, value))
 }
 
@@ -222,11 +239,11 @@ fn parse_function_name(line: &str) -> Option<String> {
     if let Some(stripped) = line.strip_prefix("function ") {
         return stripped.split('(').next().map(|s| s.trim().to_string());
     }
-    
+
     if let Some((name, _)) = line.split_once('(') {
         return Some(name.trim().to_string());
     }
-    
+
     None
 }
 
@@ -334,11 +351,14 @@ function update_system() {
 }
 "#;
         let result = parse_bash_like_config(content);
-        
+
         assert_eq!(result["aliases"]["ll"], "ls -la");
         assert_eq!(result["aliases"]["gs"], "git status");
         assert_eq!(result["exports"]["EDITOR"], "nvim");
-        assert!(result["functions"].as_array().unwrap().contains(&json!("update_system")));
+        assert!(result["functions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("update_system")));
         assert!(result["path_additions"].as_array().unwrap().len() > 0);
     }
 
@@ -354,9 +374,12 @@ function update_system
 end
 "#;
         let result = parse_fish_config(content);
-        
+
         assert_eq!(result["aliases"]["ll"], "ls -la");
         assert_eq!(result["exports"]["EDITOR"], "nvim");
-        assert!(result["functions"].as_array().unwrap().contains(&json!("update_system")));
+        assert!(result["functions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("update_system")));
     }
 }

@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tokio::process::Command;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration, Instant};
 
 fn validate_app_name(app: &str) -> OsResult<()> {
     if app.trim().is_empty() {
@@ -808,6 +808,40 @@ pub async fn click_text(
     let target = matches[occurrence].clone();
     click_at(target.center_x, target.center_y, button).await?;
     Ok(target)
+}
+
+/// Wait until text appears on screen and return first match.
+pub async fn wait_for_text(
+    query: &str,
+    case_sensitive: bool,
+    timeout_ms: u64,
+    poll_interval_ms: u64,
+    lang: Option<&str>,
+) -> OsResult<OcrMatch> {
+    if query.trim().is_empty() {
+        return Err(OsError::InvalidArgument(
+            "query cannot be empty".to_string(),
+        ));
+    }
+
+    let timeout = Duration::from_millis(timeout_ms.max(250));
+    let poll = Duration::from_millis(poll_interval_ms.max(100));
+    let started = Instant::now();
+
+    loop {
+        let matches = find_text(query, case_sensitive, 1, lang).await?;
+        if let Some(first) = matches.into_iter().next() {
+            return Ok(first);
+        }
+        if started.elapsed() >= timeout {
+            return Err(OsError::NotFound(format!(
+                "text '{}' not found within {}ms",
+                query,
+                timeout.as_millis()
+            )));
+        }
+        sleep(poll).await;
+    }
 }
 
 /// Return current active window metadata from Hyprland.

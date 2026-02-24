@@ -1,4 +1,32 @@
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
+
+const THROTTLE_SAMPLE_INTERVAL_MS: u64 = 750;
+
+struct ThrottleCache {
+    system: System,
+    last_checked: Instant,
+    last_value: bool,
+}
+
+impl ThrottleCache {
+    fn new() -> Self {
+        let mut system = System::new_with_specifics(
+            RefreshKind::new()
+                .with_cpu(CpuRefreshKind::everything())
+                .with_memory(MemoryRefreshKind::everything()),
+        );
+        system.refresh_all();
+        Self {
+            system,
+            last_checked: Instant::now()
+                .checked_sub(Duration::from_millis(THROTTLE_SAMPLE_INTERVAL_MS))
+                .unwrap_or_else(Instant::now),
+            last_value: false,
+        }
+    }
+}
 
 /// Adaptive resource monitor for scan operations
 #[derive(Debug, Clone)]
@@ -30,10 +58,7 @@ impl ResourceMonitor {
         let cpu_limit = (available_cpu * 0.6).min(60.0).max(20.0);
 
         let available_mem = total_mem_mb.saturating_sub(used_mem_mb);
-        let mem_limit = available_mem
-            .saturating_sub(2048)
-            .min(1024)
-            .max(256);
+        let mem_limit = available_mem.saturating_sub(2048).min(1024).max(256);
 
         let io_throttle = if cpu_usage > 70.0 { 5 } else { 1 };
 
@@ -56,17 +81,30 @@ impl ResourceMonitor {
     }
 
     pub fn should_throttle(&self) -> bool {
-        let mut sys = System::new_with_specifics(
-            RefreshKind::new()
-                .with_cpu(CpuRefreshKind::everything())
-                .with_memory(MemoryRefreshKind::everything()),
-        );
-        sys.refresh_all();
+        static CACHE: OnceLock<Mutex<ThrottleCache>> = OnceLock::new();
+        let cache = CACHE.get_or_init(|| Mutex::new(ThrottleCache::new()));
+        let mut cache = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let cpu_usage = sys.global_cpu_info().cpu_usage();
-        let mem_usage_percent = (sys.used_memory() as f32 / sys.total_memory() as f32) * 100.0;
+        if cache.last_checked.elapsed() < Duration::from_millis(THROTTLE_SAMPLE_INTERVAL_MS) {
+            return cache.last_value;
+        }
 
-        cpu_usage > 90.0 || mem_usage_percent > 95.0
+        cache.system.refresh_cpu();
+        cache.system.refresh_memory();
+
+        let cpu_usage = cache.system.global_cpu_info().cpu_usage();
+        let total_memory = cache.system.total_memory();
+        let mem_usage_percent = if total_memory == 0 {
+            0.0
+        } else {
+            (cache.system.used_memory() as f32 / total_memory as f32) * 100.0
+        };
+
+        cache.last_value = cpu_usage > 90.0 || mem_usage_percent > 95.0;
+        cache.last_checked = Instant::now();
+        cache.last_value
     }
 
     pub fn print_calibration(&self) {

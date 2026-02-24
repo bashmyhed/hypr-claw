@@ -4,49 +4,20 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
-use tokio::process::Command;
 
 pub mod bootstrap;
 pub mod config;
 pub mod scan;
-pub mod tui;
 
 use config::{Config, LLMProvider};
 
 enum UiInputEvent {
     Line(String),
     RunQueued(SupervisedTask),
-    CloseTui,
-    ExitApp,
-    RefreshTui,
     Skip,
 }
 
-#[derive(Debug, Clone)]
-struct TuiViewState {
-    feed_offset: usize,
-    messages_offset: usize,
-    log_offset: usize,
-    feed_page: usize,
-    messages_page: usize,
-    log_page: usize,
-}
-
-impl Default for TuiViewState {
-    fn default() -> Self {
-        Self {
-            feed_offset: 0,
-            messages_offset: 0,
-            log_offset: 0,
-            feed_page: 10,
-            messages_page: 5,
-            log_page: 8,
-        }
-    }
-}
-
 const MAX_RECOVERY_ATTEMPTS: u32 = 2;
-const TUI_LIVE_REFRESH_MS: u64 = 700;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -138,24 +109,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         context.session_id = session_key.clone();
     }
 
-    let mut active_soul_id = if context.active_soul_id.is_empty() {
-        "safe_assistant".to_string()
-    } else {
-        context.active_soul_id.clone()
-    };
-    let mut active_soul = match load_soul_profile(&active_soul_id).await {
-        Ok(soul) => soul,
-        Err(e) => {
-            eprintln!(
-                "⚠️  Failed to load soul '{}': {}. Falling back to safe_assistant.",
-                active_soul_id, e
-            );
-            active_soul_id = "safe_assistant".to_string();
-            load_soul_profile(&active_soul_id).await?
-        }
-    };
-    let available_souls = discover_souls("./souls");
+    let active_soul_id = "power_agent".to_string();
+    let active_soul = power_agent_profile();
     let mut agent_state = load_agent_os_state(&context);
+    agent_state.soul_auto = false;
+    agent_state.autonomy_mode = AutonomyMode::PromptFirst;
+    agent_state.supervisor.auto_run = false;
     ensure_default_thread(&mut agent_state);
     let recovered_stale = reconcile_supervisor_after_restart(&mut agent_state);
     if recovered_stale > 0 {
@@ -187,9 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("⚠️  Failed to save capability registry: {}", e);
         }
     }
-    if let Err(e) = set_full_auto_mode(agent_state.onboarding.trusted_full_auto) {
-        eprintln!("⚠️  Failed to persist full-auto mode flag: {}", e);
-    }
+    agent_state.onboarding.trusted_full_auto = false;
     context.active_soul_id = active_soul_id.clone();
     persist_agent_os_state(&mut context, &agent_state);
     context_manager.save(&context).await?;
@@ -248,6 +205,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     registry.register(Arc::new(hypr_claw_tools::os_tools::ProcListTool));
     registry.register(Arc::new(hypr_claw_tools::os_tools::DesktopOpenUrlTool));
     registry.register(Arc::new(hypr_claw_tools::os_tools::DesktopLaunchAppTool));
+    registry.register(Arc::new(
+        hypr_claw_tools::os_tools::DesktopLaunchAppAndWaitTextTool,
+    ));
     registry.register(Arc::new(hypr_claw_tools::os_tools::DesktopSearchWebTool));
     registry.register(Arc::new(hypr_claw_tools::os_tools::DesktopOpenGmailTool));
     registry.register(Arc::new(hypr_claw_tools::os_tools::DesktopTypeTextTool));
@@ -264,6 +224,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     registry.register(Arc::new(hypr_claw_tools::os_tools::DesktopOcrScreenTool));
     registry.register(Arc::new(hypr_claw_tools::os_tools::DesktopFindTextTool));
     registry.register(Arc::new(hypr_claw_tools::os_tools::DesktopClickTextTool));
+    registry.register(Arc::new(hypr_claw_tools::os_tools::DesktopWaitForTextTool));
     registry.register(Arc::new(hypr_claw_tools::os_tools::WallpaperSetTool));
     registry.register(Arc::new(hypr_claw_tools::os_tools::SystemShutdownTool));
     registry.register(Arc::new(hypr_claw_tools::os_tools::SystemRebootTool));
@@ -280,17 +241,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         5000,
     ));
 
-    let agent_config_path = format!("./data/agents/{}.yaml", agent_name);
-    let agent_tools = load_agent_tool_set(&agent_config_path);
-    let allowed_tools = resolve_allowed_tools(&active_soul.allowed_tools, &agent_tools);
+    let allowed_tools = derive_runtime_allowed_tools(&registry_arc, &capability_registry);
     if allowed_tools.is_empty() {
-        return Err(format!(
-            "Soul '{}' has no allowed tools after filtering",
-            active_soul_id
-        )
-        .into());
+        return Err("No runtime tools available after capability filtering".into());
     }
-    let mut active_allowed_tools = allowed_tools.clone();
+    let active_allowed_tools = allowed_tools.clone();
     let allowed_tools_state = Arc::new(RwLock::new(allowed_tools.clone()));
     let action_feed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let task_event_feed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -375,7 +330,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Run REPL loop
     println!("✅ System initialized");
-    let mut system_prompt = active_soul.system_prompt.clone();
+    let system_prompt = active_soul.system_prompt.clone();
 
     print_console_bootstrap(
         provider_name,
@@ -384,9 +339,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &display_name(&agent_state, &user_id),
         &user_id,
         &session_key,
-        &active_soul_id,
         &agent_state.active_thread_id,
-        &agent_state.autonomy_mode,
     );
 
     // Setup interrupt signal (Ctrl+C interrupts current request, does not exit process)
@@ -398,9 +351,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             interrupt_clone.notify_waiters();
         }
     });
-    let mut tui_mode = false;
-    let mut tui_live_mode = false;
-    let mut tui_view = TuiViewState::default();
     let mut auto_queued_task: Option<SupervisedTask> = None;
     let mut queue_block_notice: Option<String> = None;
     let mut background_task_index: HashMap<String, TaskStateDigest> = HashMap::new();
@@ -702,58 +652,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(task) = auto_queued_task.take() {
                     return UiInputEvent::RunQueued(task);
                 }
-                if tui_mode {
-                    let snapshot = build_tui_snapshot(
-                        provider_name,
-                        &config.model,
-                        &session_key,
-                        &user_id,
-                        &active_soul_id,
-                        &agent_state,
-                        &context,
-                        &task_list_snapshot,
-                        available_souls.len(),
-                        &action_feed,
-                        &task_event_feed,
-                        tui_live_mode,
-                        &tui_view,
-                    );
-                    match tui::run_command_center(
-                        &snapshot,
-                        Duration::from_millis(TUI_LIVE_REFRESH_MS),
-                    ) {
-                        Ok(tui::TuiOutcome::Submit(cmd)) => UiInputEvent::Line(cmd),
-                        Ok(tui::TuiOutcome::Close) => UiInputEvent::CloseTui,
-                        Ok(tui::TuiOutcome::ExitApp) => UiInputEvent::ExitApp,
-                        Ok(tui::TuiOutcome::Refresh) => UiInputEvent::RefreshTui,
-                        Err(e) => {
-                            eprintln!("❌ TUI error: {}", e);
-                            UiInputEvent::CloseTui
-                        }
-                    }
-                } else {
-                    let running_tasks = task_list_snapshot
-                        .iter()
-                        .filter(|t| t.status == hypr_claw_tasks::TaskStatus::Running)
-                        .count();
-                    let prompt = format!(
-                        "hypr[{}|{}|{}|run:{}]> ",
-                        agent_state.active_thread_id,
-                        active_soul_id,
-                        short_model_name(&config.model),
-                        running_tasks
-                    );
-                    print!("{}", ui_accent(&prompt));
-                    io::stdout().flush().ok();
+                let running_tasks = task_list_snapshot
+                    .iter()
+                    .filter(|t| t.status == hypr_claw_tasks::TaskStatus::Running)
+                    .count();
+                let prompt = format!(
+                    "hypr[{}|{}|run:{}]> ",
+                    agent_state.active_thread_id,
+                    short_model_name(&config.model),
+                    running_tasks
+                );
+                print!("{}", ui_accent(&prompt));
+                io::stdout().flush().ok();
 
-                    let mut input = String::new();
-                    io::stdin().read_line(&mut input).ok();
-                    let line = input.trim().to_string();
-                    if line.is_empty() {
-                        UiInputEvent::Skip
-                    } else {
-                        UiInputEvent::Line(line)
-                    }
+                let mut input = String::new();
+                io::stdin().read_line(&mut input).ok();
+                let line = input.trim().to_string();
+                if line.is_empty() {
+                    UiInputEvent::Skip
+                } else {
+                    UiInputEvent::Line(line)
                 }
             } => {
                 let mut queued_execution: Option<SupervisedTask> = None;
@@ -763,15 +681,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         queued_execution = Some(task.clone());
                         (task.prompt.clone(), true)
                     }
-                    UiInputEvent::CloseTui => {
-                        tui_mode = false;
-                        continue;
-                    }
-                    UiInputEvent::ExitApp => {
-                        println!("👋 Goodbye!");
-                        break;
-                    }
-                    UiInputEvent::RefreshTui => continue,
                     UiInputEvent::Skip => continue,
                 };
 
@@ -780,110 +689,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
-                if !tui_mode && matches!(input.as_str(), ":q" | ":r" | ":refresh" | "/q" | "/r") {
-                    println!("ℹ️  Use '/tui' first. Inside TUI, ':q' closes and ':r' refreshes.\n");
-                    continue;
-                }
-                if !tui_mode && input.starts_with(':') {
-                    println!("ℹ️  ':' commands are TUI-local. Use '/tui' first.\n");
-                    continue;
-                }
-
                 if !input_from_queue {
-                    if let Some(cmd) = input
-                        .strip_prefix("/tui ")
-                        .or_else(|| input.strip_prefix("tui "))
-                        .map(str::trim)
-                    {
-                        let feed_total = action_feed_total(&action_feed);
-                        let msg_total = context.recent_history.len();
-                        match cmd {
-                            "live on" => {
-                                tui_live_mode = true;
-                                println!("✅ TUI live refresh enabled ({}ms)", TUI_LIVE_REFRESH_MS);
-                            }
-                            "live off" => {
-                                tui_live_mode = false;
-                                println!("✅ TUI live refresh disabled");
-                            }
-                            "live" => {
-                                println!(
-                                    "TUI live refresh: {} ({}ms)",
-                                    if tui_live_mode { "on" } else { "off" },
-                                    TUI_LIVE_REFRESH_MS
-                                );
-                            }
-                            "feed up" => {
-                                let max_offset = max_view_offset(feed_total, tui_view.feed_page);
-                                tui_view.feed_offset =
-                                    (tui_view.feed_offset + tui_view.feed_page).min(max_offset);
-                            }
-                            "feed down" => {
-                                tui_view.feed_offset =
-                                    tui_view.feed_offset.saturating_sub(tui_view.feed_page);
-                            }
-                            "feed top" => {
-                                tui_view.feed_offset = max_view_offset(feed_total, tui_view.feed_page);
-                            }
-                            "feed latest" => {
-                                tui_view.feed_offset = 0;
-                            }
-                            "msgs up" => {
-                                let max_offset =
-                                    max_view_offset(msg_total, tui_view.messages_page);
-                                tui_view.messages_offset =
-                                    (tui_view.messages_offset + tui_view.messages_page).min(max_offset);
-                            }
-                            "msgs down" => {
-                                tui_view.messages_offset = tui_view
-                                    .messages_offset
-                                    .saturating_sub(tui_view.messages_page);
-                            }
-                            "msgs top" => {
-                                tui_view.messages_offset =
-                                    max_view_offset(msg_total, tui_view.messages_page);
-                            }
-                            "msgs latest" => {
-                                tui_view.messages_offset = 0;
-                            }
-                            "log up" => {
-                                let task_log_total = build_task_log_lines(
-                                    &task_manager.list_tasks().await,
-                                    &agent_state,
-                                    &task_event_feed,
-                                )
-                                .len();
-                                let max_offset =
-                                    max_view_offset(task_log_total, tui_view.log_page);
-                                tui_view.log_offset =
-                                    (tui_view.log_offset + tui_view.log_page).min(max_offset);
-                            }
-                            "log down" => {
-                                tui_view.log_offset =
-                                    tui_view.log_offset.saturating_sub(tui_view.log_page);
-                            }
-                            "log top" => {
-                                let task_log_total = build_task_log_lines(
-                                    &task_manager.list_tasks().await,
-                                    &agent_state,
-                                    &task_event_feed,
-                                )
-                                .len();
-                                tui_view.log_offset =
-                                    max_view_offset(task_log_total, tui_view.log_page);
-                            }
-                            "log latest" => {
-                                tui_view.log_offset = 0;
-                            }
-                            "view reset" => {
-                                tui_view = TuiViewState::default();
-                            }
-                            _ => {
-                                println!(
-                                    "Use: /tui live on|off|live | /tui feed up|down|top|latest | /tui msgs up|down|top|latest | /tui log up|down|top|latest | /tui view reset"
-                                );
-                            }
-                        }
+                    if let Some(msg) = removed_feature_notice(&input) {
+                        println!("{msg}");
                         continue;
                     }
                 }
@@ -898,45 +706,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         print_help();
                         continue;
                     }
-                    "tui" | "/tui" => {
-                        tui_view = TuiViewState::default();
-                        tui_mode = true;
-                        continue;
-                    }
-                    "repl" | "/repl" => {
-                        tui_mode = false;
-                        continue;
-                    }
                     "status" | "/status" => {
                         let task_list = task_manager.list_tasks().await;
                         print_status_panel(
                             &session_key,
                             &agent_name,
                             &display_name(&agent_state, &user_id),
-                            &active_soul_id,
                             &config.model,
-                            agent_state.soul_auto,
                             &agent_state.active_thread_id,
                             &agent_state,
                             &context,
                             &task_list,
-                        );
-                        println!();
-                        continue;
-                    }
-                    "dashboard" | "dash" | "/dashboard" => {
-                        let task_list = task_manager.list_tasks().await;
-                        print_runtime_dashboard(
-                            provider_name,
-                            &config.model,
-                            &session_key,
-                            &agent_name,
-                            &user_id,
-                            &active_soul_id,
-                            &agent_state,
-                            &context,
-                            &task_list,
-                            available_souls.len(),
                         );
                         println!();
                         continue;
@@ -976,7 +756,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "Deep scan (home directory with user consent)? [Y/n] ",
                                 true,
                             )?;
-                            
+
                             let mut scanned_profile = scan::run_integrated_scan(&user_id, deep_scan).await?;
 
                             print_system_profile_summary(&scanned_profile);
@@ -1036,23 +816,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("⏹ Interrupt signal sent.");
                         continue;
                     }
-                    "trust" | "/trust" => {
-                        println!(
-                            "Trust mode: {}",
-                            if agent_state.onboarding.trusted_full_auto {
-                                "full-auto"
-                            } else {
-                                "standard"
-                            }
-                        );
-                        println!("Use: trust on | trust off");
-                        continue;
-                    }
-                    "autonomy" | "/autonomy" => {
-                        println!("Autonomy mode: {}", agent_state.autonomy_mode.as_str());
-                        println!("Use: autonomy prompt_first | autonomy guarded | autonomy stats | autonomy reset");
-                        continue;
-                    }
                     "queue" | "/queue" => {
                         print_supervisor_queue(&agent_state);
                         continue;
@@ -1063,65 +826,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     _ => {}
                 }
-                }
-
-                if let Some(mode) = input.strip_prefix("trust ").or_else(|| input.strip_prefix("/trust ")).map(str::trim) {
-                    match mode {
-                        "on" => {
-                            agent_state.onboarding.trusted_full_auto = true;
-                            let _ = set_full_auto_mode(true);
-                            persist_agent_os_state(&mut context, &agent_state);
-                            context_manager.save(&context).await?;
-                            println!("✅ Trust mode enabled (full-auto)");
-                        }
-                        "off" => {
-                            agent_state.onboarding.trusted_full_auto = false;
-                            let _ = set_full_auto_mode(false);
-                            persist_agent_os_state(&mut context, &agent_state);
-                            context_manager.save(&context).await?;
-                            println!("✅ Trust mode disabled (standard)");
-                        }
-                        _ => {
-                            println!("Use: trust on | trust off");
-                        }
-                    }
-                    continue;
-                }
-
-                if let Some(mode) = input
-                    .strip_prefix("autonomy ")
-                    .or_else(|| input.strip_prefix("/autonomy "))
-                    .map(str::trim)
-                {
-                    match mode {
-                        "prompt_first" | "prompt" | "openclaw" => {
-                            agent_state.autonomy_mode = AutonomyMode::PromptFirst;
-                            persist_agent_os_state(&mut context, &agent_state);
-                            context_manager.save(&context).await?;
-                            println!(
-                                "✅ Autonomy mode set to prompt_first (OpenClaw-style prompt-driven)"
-                            );
-                        }
-                        "guarded" => {
-                            agent_state.autonomy_mode = AutonomyMode::Guarded;
-                            persist_agent_os_state(&mut context, &agent_state);
-                            context_manager.save(&context).await?;
-                            println!("✅ Autonomy mode set to guarded (deterministic recovery)");
-                        }
-                        "stats" => {
-                            print_autonomy_stats(&agent_state);
-                        }
-                        "reset" => {
-                            agent_state.autonomy_calibration = AutonomyCalibrationState::default();
-                            persist_agent_os_state(&mut context, &agent_state);
-                            context_manager.save(&context).await?;
-                            println!("✅ Autonomy calibration stats reset");
-                        }
-                        _ => println!(
-                            "Use: autonomy prompt_first | autonomy guarded | autonomy stats | autonomy reset"
-                        ),
-                    }
-                    continue;
                 }
 
                 if !input_from_queue {
@@ -1794,50 +1498,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                if !input_from_queue {
-                    if let Some(mode) = input
-                        .strip_prefix("queue auto ")
-                        .or_else(|| input.strip_prefix("/queue auto "))
-                        .map(str::trim)
-                    {
-                        match mode {
-                            "on" => {
-                                agent_state.supervisor.auto_run = true;
-                                persist_agent_os_state(&mut context, &agent_state);
-                                context_manager.save(&context).await?;
-                                push_task_event(&task_event_feed, "sup auto-run enabled");
-                                println!("✅ Supervisor auto-run enabled");
-                            }
-                            "off" => {
-                                agent_state.supervisor.auto_run = false;
-                                auto_queued_task = None;
-                                persist_agent_os_state(&mut context, &agent_state);
-                                context_manager.save(&context).await?;
-                                push_task_event(&task_event_feed, "sup auto-run disabled");
-                                println!("✅ Supervisor auto-run disabled");
-                            }
-                            _ => println!("Use: queue auto on|off"),
-                        }
-                        continue;
-                    }
-                }
-
-                if input.starts_with("/task ") {
-                    if handle_task_command(&input, &mut agent_state) {
-                        persist_agent_os_state(&mut context, &agent_state);
-                        context_manager.save(&context).await?;
-                    }
-                    continue;
-                }
-
-                if input == "soul" || input == "/soul" {
-                    println!("Usage:");
-                    println!("  soul list");
-                    println!("  soul switch <id>");
-                    println!("  soul auto on|off");
-                    continue;
-                }
-
                 if input == "/models" || input == "models" {
                     let current_model = agent_loop
                         .current_model()
@@ -1927,67 +1587,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &mut context,
                     ).await {
                         eprintln!("❌ Failed to switch model: {}", e);
-                    }
-                    continue;
-                }
-
-                if input == "soul list" || input == "/soul list" {
-                    println!("\n🧬 Available Souls ({}):", available_souls.len());
-                    for soul_id in &available_souls {
-                        let marker = if soul_id == &active_soul_id { "*" } else { " " };
-                        println!("  {} {}", marker, soul_id);
-                    }
-                    println!();
-                    continue;
-                }
-
-                if let Some(raw_mode) = input
-                    .strip_prefix("soul auto ")
-                    .or_else(|| input.strip_prefix("/soul auto "))
-                    .map(str::trim)
-                {
-                    match raw_mode {
-                        "on" => {
-                            agent_state.soul_auto = true;
-                            persist_agent_os_state(&mut context, &agent_state);
-                            context_manager.save(&context).await?;
-                            println!("✅ Soul auto-routing enabled");
-                        }
-                        "off" => {
-                            agent_state.soul_auto = false;
-                            persist_agent_os_state(&mut context, &agent_state);
-                            context_manager.save(&context).await?;
-                            println!("✅ Soul auto-routing disabled");
-                        }
-                        _ => eprintln!("❌ Use: soul auto on|off"),
-                    }
-                    continue;
-                }
-
-                if let Some(soul_id) = input
-                    .strip_prefix("soul switch ")
-                    .or_else(|| input.strip_prefix("/soul switch "))
-                    .map(str::trim)
-                {
-                    match switch_soul(soul_id, &runtime_registry, &agent_tools).await {
-                        Ok((profile, resolved_tools)) => {
-                            let resolved_count = resolved_tools.len();
-                            active_soul = profile;
-                            active_soul_id = soul_id.to_string();
-                            active_allowed_tools = resolved_tools;
-                            agent_loop.set_max_iterations(active_soul.max_iterations);
-                            system_prompt = active_soul.system_prompt.clone();
-                            context.active_soul_id = active_soul_id.clone();
-                            persist_agent_os_state(&mut context, &agent_state);
-                            context_manager.save(&context).await?;
-                            println!(
-                                "✅ Soul switched to '{}' ({} tools, max_iter={})",
-                                active_soul_id,
-                                resolved_count,
-                                active_soul.max_iterations
-                            );
-                        }
-                        Err(e) => eprintln!("❌ Failed to switch soul: {}", e),
                     }
                     continue;
                 }
@@ -2109,32 +1708,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         )
                     };
 
-                if agent_state.soul_auto {
-                    if let Some(candidate_soul_id) =
-                        auto_select_soul_id(&effective_input, &available_souls)
-                    {
-                        if candidate_soul_id != active_soul_id {
-                            if let Ok((profile, resolved_tools)) =
-                                switch_soul(&candidate_soul_id, &runtime_registry, &agent_tools).await
-                            {
-                                let resolved_count = resolved_tools.len();
-                                active_soul = profile;
-                                active_soul_id = candidate_soul_id;
-                                active_allowed_tools = resolved_tools;
-                                agent_loop.set_max_iterations(active_soul.max_iterations);
-                                system_prompt = active_soul.system_prompt.clone();
-                                context.active_soul_id = active_soul_id.clone();
-                                println!(
-                                    "🧠 Auto soul: '{}' ({} tools, max_iter={})",
-                                    active_soul_id,
-                                    resolved_count,
-                                    active_soul.max_iterations
-                                );
-                            }
-                        }
-                    }
-                }
-
                 context.recent_history.push(hypr_claw_memory::types::HistoryEntry {
                     timestamp: chrono::Utc::now().timestamp(),
                     role: "user".to_string(),
@@ -2149,9 +1722,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 persist_agent_os_state(&mut context, &agent_state);
                 context_manager.save(&context).await?;
 
-                let task_session_key = thread_session_key(&session_key, &agent_state.active_thread_id);
+                let task_session_key =
+                    thread_session_key(&session_key, &agent_state.active_thread_id);
+                let strict_workflow = strict_workflow_enabled();
                 let focused_tools = focused_tools_for_input(&effective_input, &active_allowed_tools);
-                let use_focused = matches!(agent_state.autonomy_mode, AutonomyMode::Guarded)
+                let use_focused = !strict_workflow
+                    && matches!(agent_state.autonomy_mode, AutonomyMode::Guarded)
                     && !focused_tools.is_empty()
                     && focused_tools.len() < active_allowed_tools.len();
                 if use_focused {
@@ -2179,15 +1755,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 agent_state.reliability.updated_at = Some(chrono::Utc::now().timestamp());
 
                 println!(
-                    "plan> analyze -> execute tools -> report  [soul={} mode={} class={} iter={} timeout={}s]",
-                    active_soul_id,
-                    agent_state.autonomy_mode.as_str(),
+                    "plan> analyze -> execute tools -> report  [mode=power class={} iter={} timeout={}s]",
                     task_class.as_str(),
                     agent_loop.max_iterations(),
                     watchdog_timeout.as_secs()
                 );
 
-                let mut turn_system_prompt = augment_system_prompt_for_turn(
+                let turn_system_prompt = augment_system_prompt_for_turn(
                     &system_prompt,
                     &agent_state.onboarding.system_profile,
                     &capability_registry,
@@ -2281,42 +1855,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     if is_tool_enforcement_error {
                         agent_state.reliability.last_stage = "recovery_tool_enforcement".to_string();
-                        if let Some(candidate_soul_id) =
-                            auto_select_soul_id(&effective_input, &available_souls)
-                        {
-                            if candidate_soul_id != active_soul_id {
-                                if let Ok((profile, resolved_tools)) =
-                                    switch_soul(&candidate_soul_id, &runtime_registry, &agent_tools)
-                                        .await
-                                {
-                                    active_soul = profile;
-                                    active_soul_id = candidate_soul_id;
-                                    active_allowed_tools = resolved_tools;
-                                    agent_loop.set_max_iterations(
-                                        active_soul
-                                            .max_iterations
-                                            .min(class_budget.max_iterations)
-                                            .max(1),
-                                    );
-                                    system_prompt = active_soul.system_prompt.clone();
-                                    context.active_soul_id = active_soul_id.clone();
-                                    println!(
-                                        "🧠 Recovery soul switch: {} (max_iter={})",
-                                        active_soul_id, active_soul.max_iterations
-                                    );
-                                    turn_system_prompt = augment_system_prompt_for_turn(
-                                        &system_prompt,
-                                        &agent_state.onboarding.system_profile,
-                                        &capability_registry,
-                                        &active_allowed_tools,
-                                        &agent_state.autonomy_mode,
-                                    );
-                                }
-                            }
-                        }
-                        if prompt_first_mode {
+                        if strict_workflow || prompt_first_mode {
                             recovery_prompt = Some(format!(
-                                "{}\n\nPrompt-first recovery mode:\n1) choose the best next tool dynamically from allowed_tools_now\n2) if a call fails, change strategy and try a different tool path\n3) avoid repeating identical failed calls\n4) do not return explanation-only text; act until done or truly blocked.",
+                                "{}\n\nStrict workflow recovery:\n1) keep using available tools and choose the next best tool dynamically\n2) if one path fails, switch to another tool path immediately\n3) avoid repeating failed call shapes\n4) finish only when task is done or truly blocked.",
                                 effective_input
                             ));
                         } else {
@@ -2329,7 +1870,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     } else if is_provider_argument_error {
                         agent_state.reliability.last_stage = "recovery_provider_argument".to_string();
-                        if prompt_first_mode {
+                        if strict_workflow || prompt_first_mode {
                             recovery_prompt = Some(format!(
                                 "{}\n\nProvider-compat recovery:\n1) emit exactly one tool call with strict JSON arguments\n2) avoid verbose narration\n3) if parsing fails, choose a simpler tool call and continue.",
                                 effective_input
@@ -2360,9 +1901,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         || is_watchdog_timeout_error
                     {
                         agent_state.reliability.last_stage = "recovery_runtime".to_string();
-                        if prompt_first_mode {
+                        if strict_workflow || prompt_first_mode {
                             recovery_prompt = Some(format!(
-                                "{}\n\nOpenClaw-style recovery:\n1) continue autonomously with new tool strategy\n2) avoid previously failing call patterns\n3) prefer direct actions over explanation\n4) return final status only when the task is actually done or clearly blocked.",
+                                "{}\n\nStrict workflow runtime recovery:\n1) continue autonomously with a different tool strategy\n2) avoid prior failing call patterns\n3) verify result after each action\n4) return final status only when done or clearly blocked.",
                                 effective_input
                             ));
                         } else {
@@ -2551,14 +2092,14 @@ fn initialize_directories() -> Result<(), Box<dyn std::error::Error>> {
     if !std::path::Path::new(default_agent_config).exists() {
         std::fs::write(
             default_agent_config,
-            "id: default\nsoul: default_soul.md\ntools:\n  - echo\n  - fs.read\n  - fs.write\n  - fs.list\n  - fs.create_dir\n  - fs.move\n  - fs.copy\n  - fs.delete\n  - hypr.workspace.switch\n  - hypr.workspace.move_window\n  - hypr.window.focus\n  - hypr.window.close\n  - hypr.window.move\n  - hypr.exec\n  - proc.spawn\n  - proc.kill\n  - proc.list\n  - desktop.open_url\n  - desktop.launch_app\n  - desktop.search_web\n  - desktop.open_gmail\n  - desktop.type_text\n  - desktop.key_press\n  - desktop.key_combo\n  - desktop.mouse_click\n  - desktop.capture_screen\n  - desktop.active_window\n  - desktop.list_windows\n  - desktop.mouse_move\n  - desktop.click_at\n  - desktop.ocr_screen\n  - desktop.find_text\n  - desktop.click_text\n  - wallpaper.set\n  - system.memory\n  - system.battery\n"
+            "id: default\nsoul: default_soul.md\ntools:\n  - echo\n  - fs.read\n  - fs.write\n  - fs.list\n  - fs.create_dir\n  - fs.move\n  - fs.copy\n  - fs.delete\n  - hypr.workspace.switch\n  - hypr.workspace.move_window\n  - hypr.window.focus\n  - hypr.window.close\n  - hypr.window.move\n  - hypr.exec\n  - proc.spawn\n  - proc.kill\n  - proc.list\n  - desktop.open_url\n  - desktop.launch_app\n  - desktop.launch_app_and_wait_text\n  - desktop.search_web\n  - desktop.open_gmail\n  - desktop.type_text\n  - desktop.key_press\n  - desktop.key_combo\n  - desktop.mouse_click\n  - desktop.capture_screen\n  - desktop.active_window\n  - desktop.list_windows\n  - desktop.mouse_move\n  - desktop.click_at\n  - desktop.ocr_screen\n  - desktop.find_text\n  - desktop.click_text\n  - desktop.wait_for_text\n  - wallpaper.set\n  - system.memory\n  - system.battery\n"
         )?;
     }
 
     if !std::path::Path::new(default_agent_soul).exists() {
         std::fs::write(
             default_agent_soul,
-            "You are a local OS assistant. Use structured tools for every system action.",
+            "You are a local Linux + Hyprland OS assistant. Follow strict workflow: observe -> plan -> execute tool -> verify -> continue until done. Choose tools dynamically from allowed set. Ask permission before destructive/high-impact actions. Use mouse+keyboard style actions for GUI tasks.",
         )?;
     }
 
@@ -2567,72 +2108,13 @@ fn initialize_directories() -> Result<(), Box<dyn std::error::Error>> {
 
 struct SoulProfile {
     system_prompt: String,
-    allowed_tools: Vec<String>,
     max_iterations: usize,
 }
 
-async fn load_soul_profile(soul_id: &str) -> Result<SoulProfile, Box<dyn std::error::Error>> {
-    let path = format!("./souls/{}.yaml", soul_id);
-    let soul = hypr_claw_policy::Soul::load(path).await?;
-    Ok(SoulProfile {
-        system_prompt: soul.system_prompt,
-        allowed_tools: soul
-            .config
-            .allowed_tools
-            .into_iter()
-            .map(|t| normalize_tool_name(&t))
-            .collect(),
-        max_iterations: soul.config.max_iterations,
-    })
-}
-
-fn load_agent_tool_set(config_path: &str) -> HashSet<String> {
-    match hypr_claw_runtime::load_agent_config(config_path) {
-        Ok(config) => config
-            .tools
-            .into_iter()
-            .map(|t| normalize_tool_name(&t))
-            .collect(),
-        Err(_) => HashSet::new(),
-    }
-}
-
-fn resolve_allowed_tools(
-    soul_allowed: &[String],
-    agent_allowed: &HashSet<String>,
-) -> HashSet<String> {
-    let soul_set: HashSet<String> = soul_allowed
-        .iter()
-        .map(|t| normalize_tool_name(t))
-        .collect();
-
-    if agent_allowed.is_empty() {
-        return soul_set;
-    }
-    if soul_set.is_empty() {
-        return agent_allowed.clone();
-    }
-
-    soul_set
-        .into_iter()
-        .filter(|tool| agent_allowed.contains(tool))
-        .collect()
-}
-
-fn normalize_tool_name(name: &str) -> String {
-    match name {
-        "file_read" | "file.read" => "fs.read".to_string(),
-        "file_write" | "file.write" => "fs.write".to_string(),
-        "file_list" | "file.list" => "fs.list".to_string(),
-        "shell_exec" | "shell.exec" => "hypr.exec".to_string(),
-        "process_list" => "proc.list".to_string(),
-        "process_spawn" => "proc.spawn".to_string(),
-        "system_info" => "system.memory".to_string(),
-        "browser.open_url" => "desktop.open_url".to_string(),
-        "browser.search" => "desktop.search_web".to_string(),
-        "app.launch" => "desktop.launch_app".to_string(),
-        "gmail.open" => "desktop.open_gmail".to_string(),
-        other => other.to_string(),
+fn power_agent_profile() -> SoulProfile {
+    SoulProfile {
+        system_prompt: "You are a powerful local Linux + Hyprland OS assistant.\nFollow strict workflow: observe -> plan -> execute tool -> verify -> continue until done.\nFor GUI tasks, operate like a human using screen + cursor + keyboard tools.\nChoose tools dynamically from allowed_tools_now.\nAsk for permission before destructive/high-impact actions.\nAvoid hardcoded assumptions and adapt from live system/context.".to_string(),
+        max_iterations: 36,
     }
 }
 
@@ -2653,11 +2135,116 @@ fn normalize_runtime_tool_name(name: &str) -> String {
     }
 }
 
+fn removed_feature_notice(input: &str) -> Option<&'static str> {
+    let cmd = input.trim().to_ascii_lowercase();
+
+    if cmd == "tui"
+        || cmd == "/tui"
+        || cmd.starts_with("tui ")
+        || cmd.starts_with("/tui ")
+        || cmd == "repl"
+        || cmd == "/repl"
+    {
+        return Some("ℹ️ TUI/REPL mode switching has been removed. Use the single streamlined prompt workflow.");
+    }
+    if cmd == "dashboard" || cmd == "dash" || cmd == "/dashboard" {
+        return Some("ℹ️ Dashboard mode has been removed to reduce bloat. Use `status` for a lightweight snapshot.");
+    }
+    if cmd.starts_with("soul") || cmd.starts_with("/soul ") {
+        return Some(
+            "ℹ️ Soul system has been removed. A single `power_agent` profile is always active.",
+        );
+    }
+    if cmd.starts_with("autonomy") || cmd.starts_with("/autonomy ") {
+        return Some(
+            "ℹ️ Autonomy modes were removed. The agent always runs in strict power workflow mode.",
+        );
+    }
+    if cmd == "trust" || cmd == "/trust" || cmd.starts_with("trust ") || cmd.starts_with("/trust ")
+    {
+        return Some("ℹ️ Trust/safe mode toggles were removed. Permission flow is handled directly per action.");
+    }
+    if cmd == "/task" || cmd.starts_with("/task ") {
+        return Some("ℹ️ Task-thread commands were removed to simplify workflow. Use `queue add|run|status|clear`.");
+    }
+    if cmd.starts_with("queue prune")
+        || cmd.starts_with("/queue prune")
+        || cmd.starts_with("queue inspect")
+        || cmd.starts_with("/queue inspect")
+        || cmd.starts_with("queue events")
+        || cmd.starts_with("/queue events")
+        || cmd.starts_with("queue stop")
+        || cmd.starts_with("/queue stop")
+        || cmd.starts_with("queue retry")
+        || cmd.starts_with("/queue retry")
+        || cmd.starts_with("queue auto")
+        || cmd.starts_with("/queue auto")
+    {
+        return Some("ℹ️ Advanced queue controls were removed. Supported queue commands: `queue`, `queue status`, `queue add <prompt>`, `queue run`, `queue clear`.");
+    }
+
+    None
+}
+
+fn derive_runtime_allowed_tools(
+    registry: &Arc<hypr_claw_tools::ToolRegistryImpl>,
+    capability_registry: &Value,
+) -> HashSet<String> {
+    let has_array_entries = |path: &str| {
+        capability_registry
+            .pointer(path)
+            .and_then(|v| v.as_array())
+            .map(|arr| !arr.is_empty())
+            .unwrap_or(false)
+    };
+    let ocr_available = capability_registry
+        .pointer("/capabilities/ocr_available")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let hyprland_available = capability_registry
+        .pointer("/platform/hyprland_available")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let has_input_backend = has_array_entries("/capabilities/input_backends");
+    let has_screenshot_backend = has_array_entries("/capabilities/screenshot_backends");
+    let has_wallpaper_backend = has_array_entries("/capabilities/wallpaper_backends");
+
+    registry
+        .list()
+        .into_iter()
+        .filter(|tool| match tool.as_str() {
+            "hypr.workspace.switch"
+            | "hypr.workspace.move_window"
+            | "hypr.window.focus"
+            | "hypr.window.close"
+            | "hypr.window.move"
+            | "hypr.exec" => hyprland_available,
+            "wallpaper.set" => has_wallpaper_backend,
+            "desktop.capture_screen" => has_screenshot_backend,
+            "desktop.ocr_screen" | "desktop.find_text" => has_screenshot_backend && ocr_available,
+            "desktop.wait_for_text" | "desktop.launch_app_and_wait_text" => {
+                has_screenshot_backend && ocr_available
+            }
+            "desktop.type_text"
+            | "desktop.key_press"
+            | "desktop.key_combo"
+            | "desktop.mouse_click"
+            | "desktop.mouse_move"
+            | "desktop.click_at" => has_input_backend,
+            "desktop.click_text" => has_input_backend && has_screenshot_backend && ocr_available,
+            _ => true,
+        })
+        .collect()
+}
+
+#[cfg(test)]
 fn max_view_offset(total: usize, page: usize) -> usize {
     let page = page.max(1);
     total.saturating_sub(page)
 }
 
+#[cfg(test)]
 fn tail_window_slice<T: Clone>(
     items: &[T],
     offset_from_latest: usize,
@@ -2672,10 +2259,6 @@ fn tail_window_slice<T: Clone>(
     let end = total.saturating_sub(clamped_offset);
     let start = end.saturating_sub(page);
     (items[start..end].to_vec(), start + 1, end, total)
-}
-
-fn action_feed_total(feed: &Arc<Mutex<Vec<String>>>) -> usize {
-    feed.lock().ok().map(|f| f.len()).unwrap_or(0)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2758,6 +2341,7 @@ fn sync_background_task_events(
     }
 }
 
+#[cfg(test)]
 fn build_task_log_lines(
     task_list: &[hypr_claw_tasks::TaskInfo],
     agent_state: &AgentOsState,
@@ -2812,258 +2396,6 @@ fn build_task_log_lines(
 
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     rows.into_iter().map(|(_, line)| line).collect()
-}
-
-fn build_tui_snapshot(
-    provider_name: &str,
-    model: &str,
-    session_key: &str,
-    user_id: &str,
-    active_soul_id: &str,
-    agent_state: &AgentOsState,
-    context: &hypr_claw_memory::types::ContextData,
-    task_list: &[hypr_claw_tasks::TaskInfo],
-    soul_count: usize,
-    action_feed: &Arc<Mutex<Vec<String>>>,
-    task_event_feed: &Arc<Mutex<Vec<String>>>,
-    tui_live_mode: bool,
-    tui_view: &TuiViewState,
-) -> tui::TuiSnapshot {
-    let running = task_list
-        .iter()
-        .filter(|t| t.status == hypr_claw_tasks::TaskStatus::Running)
-        .count();
-    let done = task_list
-        .iter()
-        .filter(|t| t.status == hypr_claw_tasks::TaskStatus::Completed)
-        .count();
-    let failed = task_list
-        .iter()
-        .filter(|t| t.status == hypr_claw_tasks::TaskStatus::Failed)
-        .count();
-    let supervisor_queued = agent_state
-        .supervisor
-        .tasks
-        .iter()
-        .filter(|t| t.status == SupervisedTaskStatus::Queued)
-        .count();
-    let supervisor_running = agent_state
-        .supervisor
-        .tasks
-        .iter()
-        .filter(|t| t.status == SupervisedTaskStatus::Running)
-        .count();
-    let supervisor_done = agent_state
-        .supervisor
-        .tasks
-        .iter()
-        .filter(|t| t.status == SupervisedTaskStatus::Completed)
-        .count();
-    let supervisor_failed = agent_state
-        .supervisor
-        .tasks
-        .iter()
-        .filter(|t| t.status == SupervisedTaskStatus::Failed)
-        .count();
-    let supervisor_cancelled = agent_state
-        .supervisor
-        .tasks
-        .iter()
-        .filter(|t| t.status == SupervisedTaskStatus::Cancelled)
-        .count();
-
-    let threads = agent_state
-        .task_threads
-        .iter()
-        .map(|t| tui::ThreadRow {
-            id: t.id.clone(),
-            title: t.title.clone(),
-            active: t.id == agent_state.active_thread_id,
-            archived: t.archived,
-        })
-        .collect::<Vec<_>>();
-
-    let tasks = task_list
-        .iter()
-        .map(|t| tui::TaskRow {
-            id: t.id.clone(),
-            state: format!("{:?}", t.status).to_uppercase(),
-            progress_percent: (t.progress.clamp(0.0, 1.0) * 100.0).round() as u16,
-            description: t.description.clone(),
-        })
-        .collect::<Vec<_>>();
-    let mut supervisor_tasks = agent_state
-        .supervisor
-        .tasks
-        .iter()
-        .filter(|t| {
-            t.status == SupervisedTaskStatus::Queued || t.status == SupervisedTaskStatus::Running
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    supervisor_tasks.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    let supervisor_tasks = supervisor_tasks
-        .into_iter()
-        .take(12)
-        .map(|t| tui::SupervisorTaskRow {
-            id: t.id,
-            state: match t.status {
-                SupervisedTaskStatus::Queued => "queued".to_string(),
-                SupervisedTaskStatus::Running => "running".to_string(),
-                SupervisedTaskStatus::Completed => "done".to_string(),
-                SupervisedTaskStatus::Failed => "failed".to_string(),
-                SupervisedTaskStatus::Cancelled => "cancel".to_string(),
-            },
-            class: t.class.as_str().to_string(),
-            resources: if t.resources.is_empty() {
-                "general".to_string()
-            } else {
-                truncate_for_table(&t.resources.join(","), 12)
-            },
-            background_task_id: t
-                .background_task_id
-                .as_deref()
-                .map(|id| truncate_for_table(id, 12))
-                .unwrap_or_else(|| "-".to_string()),
-            prompt: t.prompt,
-        })
-        .collect::<Vec<_>>();
-
-    let mut actionable_ids = Vec::<String>::new();
-    let mut supervisor_all = agent_state.supervisor.tasks.clone();
-    supervisor_all.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    for task in supervisor_all
-        .iter()
-        .filter(|task| {
-            task.status == SupervisedTaskStatus::Queued
-                || task.status == SupervisedTaskStatus::Running
-        })
-        .take(6)
-    {
-        let bg = task.background_task_id.as_deref().unwrap_or("-");
-        actionable_ids.push(format!(
-            "stop: {} | bg: {}",
-            truncate_for_table(&task.id, 14),
-            truncate_for_table(bg, 18)
-        ));
-    }
-    for task in supervisor_all
-        .iter()
-        .filter(|task| {
-            matches!(
-                task.status,
-                SupervisedTaskStatus::Completed
-                    | SupervisedTaskStatus::Failed
-                    | SupervisedTaskStatus::Cancelled
-            )
-        })
-        .take(4)
-    {
-        actionable_ids.push(format!(
-            "retry: {} ({})",
-            truncate_for_table(&task.id, 14),
-            truncate_for_table(&format!("{:?}", task.status).to_lowercase(), 10)
-        ));
-    }
-    if !supervisor_all.is_empty() {
-        actionable_ids.push("prune: queue prune 200".to_string());
-        actionable_ids.push("stop-all: queue stop all".to_string());
-        actionable_ids.push("retry-failed: queue retry failed".to_string());
-        actionable_ids.push("retry-completed: queue retry completed".to_string());
-        actionable_ids.push("retry-all: queue retry all".to_string());
-    }
-
-    let plan = context
-        .current_plan
-        .as_ref()
-        .map(|p| {
-            format!(
-                "{} [{} step {}/{}]",
-                p.goal,
-                p.status,
-                p.current_step + 1,
-                p.steps.len()
-            )
-        })
-        .unwrap_or_else(|| "none".to_string());
-
-    let action_feed_all = action_feed
-        .lock()
-        .ok()
-        .map(|g| g.clone())
-        .unwrap_or_default();
-    let (action_feed, action_start, action_end, action_total) =
-        tail_window_slice(&action_feed_all, tui_view.feed_offset, tui_view.feed_page);
-
-    let messages_all = context
-        .recent_history
-        .iter()
-        .map(|h| format!("{}: {}", h.role, h.content))
-        .collect::<Vec<_>>();
-    let (recent_messages, msg_start, msg_end, msg_total) = tail_window_slice(
-        &messages_all,
-        tui_view.messages_offset,
-        tui_view.messages_page,
-    );
-    let task_log_all = build_task_log_lines(task_list, agent_state, task_event_feed);
-    let (task_log, log_start, log_end, log_total) =
-        tail_window_slice(&task_log_all, tui_view.log_offset, tui_view.log_page);
-
-    tui::TuiSnapshot {
-        provider: provider_name.to_string(),
-        model: model.to_string(),
-        user: format!("{} ({})", display_name(agent_state, user_id), user_id),
-        session: session_key.to_string(),
-        soul: active_soul_id.to_string(),
-        autonomy_mode: agent_state.autonomy_mode.as_str().to_string(),
-        thread: agent_state.active_thread_id.clone(),
-        live_mode: tui_live_mode,
-        souls_count: soul_count,
-        task_counts: (task_list.len(), running, done, failed),
-        supervisor_counts: (
-            supervisor_queued,
-            supervisor_running,
-            supervisor_done,
-            supervisor_failed,
-            supervisor_cancelled,
-        ),
-        supervisor_auto_run: agent_state.supervisor.auto_run,
-        history_len: context.recent_history.len(),
-        facts_len: context.facts.len(),
-        approval_counts: (
-            context.approval_history.len(),
-            context.pending_approvals.len(),
-        ),
-        token_usage: (
-            context.token_usage.total_input,
-            context.token_usage.total_output,
-            context.token_usage.by_session,
-        ),
-        plan,
-        reliability: reliability_summary(agent_state),
-        threads,
-        tasks,
-        supervisor_tasks,
-        action_feed,
-        recent_messages,
-        action_feed_window: if action_total == 0 {
-            "0/0".to_string()
-        } else {
-            format!("{}-{} / {}", action_start, action_end, action_total)
-        },
-        recent_messages_window: if msg_total == 0 {
-            "0/0".to_string()
-        } else {
-            format!("{}-{} / {}", msg_start, msg_end, msg_total)
-        },
-        task_log,
-        task_log_window: if log_total == 0 {
-            "0/0".to_string()
-        } else {
-            format!("{}-{} / {}", log_start, log_end, log_total)
-        },
-        actionable_ids,
-    }
 }
 
 const UI_RESET: &str = "\x1b[0m";
@@ -3184,9 +2516,7 @@ fn print_console_bootstrap(
     display_name: &str,
     user_id: &str,
     session_key: &str,
-    active_soul_id: &str,
     active_thread_id: &str,
-    autonomy_mode: &AutonomyMode,
 ) {
     println!(
         "{}",
@@ -3214,15 +2544,11 @@ fn print_console_bootstrap(
         "║ Profile  : {:<54} ║",
         truncate_for_table(
             &format!(
-                "agent={}  soul={}  thread={}",
-                agent_name, active_soul_id, active_thread_id
+                "agent={}  mode=power  thread={}",
+                agent_name, active_thread_id
             ),
             54
         )
-    );
-    println!(
-        "║ Autonomy : {:<54} ║",
-        truncate_for_table(autonomy_mode.as_str(), 54)
     );
     println!(
         "{}",
@@ -3233,7 +2559,7 @@ fn print_console_bootstrap(
         ui_dim(&format!(
             "║ Commands: {:<58}║",
             truncate_for_table(
-                "help, status, dashboard, capabilities, /tui, /models, soul, /task, queue, autonomy...",
+                "help, status, scan, capabilities, /models, tasks, queue add/run/status/clear...",
                 58
             )
         ))
@@ -3250,17 +2576,8 @@ fn print_help() {
     println!("  {}", ui_accent("Core"));
     println!("    help                  Show this help");
     println!("    status                Runtime state snapshot");
-    println!("    dashboard | /dashboard|dash  Extended operational dashboard");
-    println!("    tui | /tui            Open full-screen command center");
-    println!("      (inside TUI: :q close, :r refresh, :live-on/:live-off)");
-    println!("    /tui live on|off      Enable/disable timed TUI auto-refresh");
-    println!("    repl | /repl          Return to standard prompt mode");
     println!("    scan                  Re-run standard/deep system learning scan");
     println!("    capabilities          Show runtime capability registry summary");
-    println!("    trust on|off          Toggle trusted full-auto execution mode");
-    println!("    autonomy <mode>       Set autonomy mode (prompt_first|guarded)");
-    println!("    autonomy stats        Show prompt_first vs guarded metrics");
-    println!("    autonomy reset        Reset autonomy calibration metrics");
     println!("    clear                 Clear terminal");
     println!("    interrupt             Send interrupt signal to active run");
     println!("    exit | quit           Exit agent");
@@ -3268,37 +2585,16 @@ fn print_help() {
     println!("    /models               Interactive model switch");
     println!("    /models list          List provider models");
     println!("    /models set <id>      Set model directly");
-    println!("  {}", ui_accent("Souls"));
-    println!("    soul list             List installed soul profiles");
-    println!("    soul switch <id>      Switch active soul");
-    println!("    soul auto on|off      Toggle intent-based soul routing");
     println!("  {}", ui_accent("Tasks"));
     println!("    tasks                 Show background task table");
-    println!("    /task new <title>     Create task thread");
-    println!("    /task list            List task threads");
-    println!("    /task switch <id>     Switch active thread");
-    println!("    /task close <id>      Archive thread");
     println!("    queue                 Show supervisor queue");
     println!("    queue status          Compact queue summary + actionable IDs");
     println!("    queue add <prompt>    Add task prompt to queue");
     println!("    queue run             Run next queued task");
     println!("    queue clear           Cancel queued items");
-    println!("    queue prune [N]       Prune old terminal tasks (default keep latest 200)");
-    println!("    queue stop all        Stop all queued/running supervisor tasks");
-    println!("    queue stop <id>       Stop queued/running task by sup_id or bg_id");
-    println!("    queue retry failed    Retry all failed/cancelled supervisor tasks");
-    println!("    queue retry completed Retry all completed supervisor tasks");
-    println!("    queue retry all       Retry all completed/failed/cancelled tasks");
-    println!("    queue retry <id>      Re-enqueue a completed/failed/cancelled task");
-    println!("    queue auto on|off     Toggle auto-run for queued tasks");
-    println!("    /tui feed up|down|top|latest   Scroll TUI decision feed");
-    println!("    /tui log up|down|top|latest    Scroll TUI task log");
-    println!("    /tui msgs up|down|top|latest   Scroll TUI recent messages");
-    println!("    /tui view reset       Reset TUI scroll offsets");
     println!("  {}", ui_accent("System"));
     println!("    profile               Show learned system profile");
     println!("    scan                  Re-run system scan");
-    println!("    approve <task_id>     Approval helper");
     println!();
 }
 
@@ -3386,43 +2682,6 @@ fn record_autonomy_outcome(
     *entry = entry.saturating_add(1);
 }
 
-fn autonomy_mode_summary(label: &str, metrics: &AutonomyModeMetrics) -> String {
-    let runs = metrics.runs.max(1);
-    let success_pct = (metrics.successes as f64 * 100.0) / runs as f64;
-    let avg_ms = metrics.total_duration_ms / runs;
-    let avg_fallback = metrics.total_fallback_attempts as f64 / runs as f64;
-    let top_stop = metrics
-        .stop_codes
-        .iter()
-        .max_by_key(|(_, count)| *count)
-        .map(|(code, count)| format!("{}({})", code, count))
-        .unwrap_or_else(|| "none".to_string());
-    format!(
-        "{} runs={} succ={} fail={} succ%={:.1} avg_ms={} avg_fb={:.2} top_stop={}",
-        label,
-        metrics.runs,
-        metrics.successes,
-        metrics.failures,
-        success_pct,
-        avg_ms,
-        avg_fallback,
-        top_stop
-    )
-}
-
-fn print_autonomy_stats(state: &AgentOsState) {
-    println!("\n{}", ui_title("Autonomy Calibration Stats"));
-    println!(
-        "  {}",
-        autonomy_mode_summary("prompt_first", &state.autonomy_calibration.prompt_first)
-    );
-    println!(
-        "  {}",
-        autonomy_mode_summary("guarded", &state.autonomy_calibration.guarded)
-    );
-    println!();
-}
-
 fn extract_retry_after_seconds(error_msg: &str) -> Option<u64> {
     let mut num = String::new();
     for ch in error_msg.chars() {
@@ -3504,8 +2763,8 @@ fn remediation_hint_for_stop_code(stop_code: &str, input: &str) -> String {
                 "Task planning hit iteration budget. Narrow the scope and retry with fewer combined actions.".to_string()
             }
         }
-        "STOP_RECOVERY_BUDGET_EXHAUSTED" => "Automatic recovery attempts were exhausted. Retry with a narrower prompt or switch soul/model.".to_string(),
-        _ => "Unexpected runtime failure. Run 'status' and 'dashboard' for telemetry, then retry with a narrower prompt.".to_string(),
+        "STOP_RECOVERY_BUDGET_EXHAUSTED" => "Automatic recovery attempts were exhausted. Retry with a narrower prompt or switch model.".to_string(),
+        _ => "Unexpected runtime failure. Run 'status' for telemetry, then retry with a narrower prompt.".to_string(),
     }
 }
 
@@ -3513,9 +2772,7 @@ fn print_status_panel(
     session_key: &str,
     agent_name: &str,
     display_name: &str,
-    active_soul_id: &str,
     model: &str,
-    soul_auto: bool,
     active_thread_id: &str,
     agent_state: &AgentOsState,
     context: &hypr_claw_memory::types::ContextData,
@@ -3554,38 +2811,8 @@ fn print_status_panel(
         ui_info(display_name)
     );
     println!(
-        "  Soul         : {} (auto: {})",
-        ui_accent(active_soul_id),
-        if soul_auto { "on" } else { "off" }
-    );
-    println!(
-        "  Autonomy     : {}",
-        ui_info(agent_state.autonomy_mode.as_str())
-    );
-    println!(
-        "  AutoStats    : {}",
-        truncate_for_table(
-            &autonomy_mode_summary(
-                "prompt_first",
-                &agent_state.autonomy_calibration.prompt_first
-            ),
-            96
-        )
-    );
-    println!(
-        "                 {}",
-        truncate_for_table(
-            &autonomy_mode_summary("guarded", &agent_state.autonomy_calibration.guarded),
-            96
-        )
-    );
-    println!(
-        "  Trust Mode   : {}",
-        if agent_state.onboarding.trusted_full_auto {
-            ui_success("full-auto")
-        } else {
-            ui_warn("standard")
-        }
+        "  Mode         : {}",
+        ui_info("power")
     );
     println!(
         "  Scan Depth   : {}",
@@ -3617,14 +2844,9 @@ fn print_status_panel(
         }
     );
     println!(
-        "  Supervisor   : {} queued / {} running (auto: {})",
+        "  Supervisor   : {} queued / {} running",
         supervisor_queued,
-        supervisor_running,
-        if agent_state.supervisor.auto_run {
-            "on"
-        } else {
-            "off"
-        }
+        supervisor_running
     );
     println!(
         "  Memory       : history={} facts={} approvals={} pending={}",
@@ -3651,218 +2873,6 @@ fn print_status_panel(
     } else {
         println!("  Plan         : none");
     }
-}
-
-fn print_runtime_dashboard(
-    provider_name: &str,
-    model: &str,
-    session_key: &str,
-    agent_name: &str,
-    user_id: &str,
-    active_soul_id: &str,
-    agent_state: &AgentOsState,
-    context: &hypr_claw_memory::types::ContextData,
-    task_list: &[hypr_claw_tasks::TaskInfo],
-    soul_count: usize,
-) {
-    println!(
-        "\n{}",
-        ui_accent("════════════════════════════════  Dashboard  ════════════════════════════════")
-    );
-    println!(
-        "{} {} | {} {}",
-        ui_dim("Provider:"),
-        ui_info(provider_name),
-        ui_dim("Model:"),
-        ui_info(model)
-    );
-    println!(
-        "{} {} ({}) | {} {} | {} {}",
-        ui_dim("Identity:"),
-        ui_info(&display_name(agent_state, user_id)),
-        user_id,
-        ui_dim("Agent:"),
-        ui_info(agent_name),
-        ui_dim("Session:"),
-        ui_dim(session_key)
-    );
-    println!(
-        "{} {} (auto: {}) | {} {} | {} {}",
-        ui_dim("Soul:"),
-        ui_accent(active_soul_id),
-        if agent_state.soul_auto { "on" } else { "off" },
-        ui_dim("Available souls:"),
-        soul_count,
-        ui_dim("Active thread:"),
-        ui_dim(&agent_state.active_thread_id)
-    );
-    println!(
-        "{} {}",
-        ui_dim("Autonomy:"),
-        ui_info(agent_state.autonomy_mode.as_str())
-    );
-    println!(
-        "{} {}",
-        ui_dim("AutoStats:"),
-        truncate_for_table(
-            &autonomy_mode_summary(
-                "prompt_first",
-                &agent_state.autonomy_calibration.prompt_first
-            ),
-            76
-        )
-    );
-    println!(
-        "{} {}",
-        ui_dim("           "),
-        truncate_for_table(
-            &autonomy_mode_summary("guarded", &agent_state.autonomy_calibration.guarded),
-            76
-        )
-    );
-    println!(
-        "{} {} | {} {}",
-        ui_dim("Trust mode:"),
-        if agent_state.onboarding.trusted_full_auto {
-            ui_success("full-auto")
-        } else {
-            ui_warn("standard")
-        },
-        ui_dim("Scan:"),
-        if agent_state.onboarding.deep_scan_completed {
-            ui_success("deep")
-        } else {
-            ui_dim("standard")
-        }
-    );
-
-    let running = task_list
-        .iter()
-        .filter(|t| t.status == hypr_claw_tasks::TaskStatus::Running)
-        .count();
-    let done = task_list
-        .iter()
-        .filter(|t| t.status == hypr_claw_tasks::TaskStatus::Completed)
-        .count();
-    let failed = task_list
-        .iter()
-        .filter(|t| t.status == hypr_claw_tasks::TaskStatus::Failed)
-        .count();
-    let supervisor_queued = agent_state
-        .supervisor
-        .tasks
-        .iter()
-        .filter(|t| t.status == SupervisedTaskStatus::Queued)
-        .count();
-    let supervisor_running = agent_state
-        .supervisor
-        .tasks
-        .iter()
-        .filter(|t| t.status == SupervisedTaskStatus::Running)
-        .count();
-
-    println!(
-        "{} {} total | {} running | {} done | {} failed",
-        ui_dim("Tasks:"),
-        task_list.len(),
-        running,
-        done,
-        failed
-    );
-    println!(
-        "{} {} queued | {} running | auto {}",
-        ui_dim("Supervisor:"),
-        supervisor_queued,
-        supervisor_running,
-        if agent_state.supervisor.auto_run {
-            "on"
-        } else {
-            "off"
-        }
-    );
-    println!(
-        "{} {}",
-        ui_dim("Reliability:"),
-        truncate_for_table(&reliability_summary(agent_state), 76)
-    );
-
-    if let Some(plan) = &context.current_plan {
-        println!(
-            "{} {} [{}] step {}/{}",
-            ui_dim("Plan:"),
-            truncate_for_table(&plan.goal, 56),
-            plan.status,
-            plan.current_step.saturating_add(1),
-            plan.steps.len()
-        );
-    } else {
-        println!("{} none", ui_dim("Plan:"));
-    }
-
-    let top_tools = {
-        let mut items: Vec<(&String, &u64)> = context.tool_stats.by_tool.iter().collect();
-        items.sort_by(|a, b| b.1.cmp(a.1));
-        items.into_iter().take(5).collect::<Vec<_>>()
-    };
-    if top_tools.is_empty() {
-        println!("{} no recorded calls", ui_dim("Tool Usage:"));
-    } else {
-        let formatted = top_tools
-            .iter()
-            .map(|(tool, count)| format!("{}({})", tool, count))
-            .collect::<Vec<_>>()
-            .join(", ");
-        println!(
-            "{} total={} failures={} top=[{}]",
-            ui_dim("Tool Usage:"),
-            context.tool_stats.total_calls,
-            context.tool_stats.failures,
-            formatted
-        );
-    }
-
-    if agent_state.onboarding.last_scan_at.is_some() {
-        let distro = agent_state
-            .onboarding
-            .system_profile
-            .pointer("/platform/distro_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-        let kernel = agent_state
-            .onboarding
-            .system_profile
-            .pointer("/platform/kernel")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-        let ws = agent_state
-            .onboarding
-            .system_profile
-            .pointer("/desktop/active_workspace")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        println!(
-            "{} {} | kernel {} | workspace {} | scanned {}",
-            ui_dim("Host Profile:"),
-            distro,
-            kernel,
-            ws,
-            format_timestamp(agent_state.onboarding.last_scan_at.unwrap_or(0))
-        );
-    }
-
-    println!(
-        "{} history={} facts={} approvals={} pending={} long_summary={} chars",
-        ui_dim("Memory:"),
-        context.recent_history.len(),
-        context.facts.len(),
-        context.approval_history.len(),
-        context.pending_approvals.len(),
-        context.long_term_summary.chars().count()
-    );
-    println!(
-        "{}",
-        ui_accent("══════════════════════════════════════════════════════════════════════════════")
-    );
 }
 
 fn model_priority(model_id: &str) -> usize {
@@ -4158,7 +3168,7 @@ struct SupervisorState {
 }
 
 fn default_supervisor_auto_run() -> bool {
-    true
+    false
 }
 
 fn default_supervisor_next_id() -> u64 {
@@ -4199,7 +3209,7 @@ impl Default for AgentOsState {
     fn default() -> Self {
         Self {
             onboarding: OnboardingState::default(),
-            soul_auto: true,
+            soul_auto: false,
             task_threads: vec![TaskThread::new("task-1".to_string(), "Main".to_string())],
             active_thread_id: "task-1".to_string(),
             supervisor: SupervisorState::default(),
@@ -4260,6 +3270,18 @@ impl AutonomyMode {
 
 fn default_autonomy_mode() -> AutonomyMode {
     AutonomyMode::PromptFirst
+}
+
+fn strict_workflow_enabled() -> bool {
+    std::env::var("HYPR_CLAW_STRICT_WORKFLOW")
+        .ok()
+        .map(|raw| {
+            !matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off"
+            )
+        })
+        .unwrap_or(true)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -4351,13 +3373,13 @@ fn load_agent_os_state(context: &hypr_claw_memory::types::ContextData) -> AgentO
         .and_then(|v| serde_json::from_value::<AgentOsState>(v.clone()).ok())
         .unwrap_or_default();
 
-    // Migration: if legacy state did not include soul_auto, default to enabled.
+    // Migration: if legacy state did not include soul_auto, default to disabled.
     let soul_auto_present = maybe_state
         .as_ref()
         .and_then(|v| v.get("soul_auto"))
         .is_some();
     if !soul_auto_present {
-        state.soul_auto = true;
+        state.soul_auto = false;
     }
 
     state
@@ -4443,21 +3465,6 @@ fn detect_user_id() -> String {
         .unwrap_or_else(|| "local_user".to_string())
 }
 
-fn full_auto_flag_path() -> &'static str {
-    "./data/full_auto_mode.flag"
-}
-
-fn set_full_auto_mode(enabled: bool) -> io::Result<()> {
-    let path = full_auto_flag_path();
-    if enabled {
-        std::fs::write(path, b"enabled")
-    } else if std::path::Path::new(path).exists() {
-        std::fs::remove_file(path)
-    } else {
-        Ok(())
-    }
-}
-
 fn prompt_line(prompt: &str) -> io::Result<String> {
     print!("{prompt}");
     io::stdout().flush()?;
@@ -4497,18 +3504,14 @@ async fn run_first_run_onboarding(
         };
     }
 
-    state.onboarding.trusted_full_auto = prompt_yes_no(
-        "Enable trusted full-auto mode (single consent for local actions)? [y/N] ",
-        false,
-    )?;
-    let _ = set_full_auto_mode(state.onboarding.trusted_full_auto);
+    state.onboarding.trusted_full_auto = false;
 
     if prompt_yes_no("Allow first-time system study scan? [Y/n] ", true)? {
         let deep_scan = prompt_yes_no(
             "Run deep system learning scan (home directory with consent)? [Y/n] ",
             true,
         )?;
-        
+
         state.onboarding.system_profile = scan::run_integrated_scan(user_id, deep_scan).await?;
         state.onboarding.deep_scan_completed = deep_scan;
         state.onboarding.last_scan_at = Some(chrono::Utc::now().timestamp());
@@ -4770,6 +3773,7 @@ fn build_capability_registry(profile: &Value) -> Value {
             "workspace_rules_sample": profile.pointer("/deep_scan/hyprland/workspace_rules_sample").cloned().unwrap_or_else(|| json!([]))
         },
         "packages": {
+            "total_count": profile.pointer("/deep_scan/packages/total_count").and_then(|v| v.as_u64()).unwrap_or(0),
             "pacman_explicit_count": profile.pointer("/deep_scan/packages/pacman_explicit_count").and_then(|v| v.as_u64()).unwrap_or(0),
             "aur_count": profile.pointer("/deep_scan/packages/aur_count").and_then(|v| v.as_u64()).unwrap_or(0)
         },
@@ -5146,504 +4150,6 @@ fn print_capability_registry_diff_summary(old_registry: &Value, new_registry: &V
     println!();
 }
 
-async fn collect_system_profile(user_id: &str) -> Value {
-    let os_release = tokio::fs::read_to_string("/etc/os-release")
-        .await
-        .unwrap_or_default();
-    let distro_name = parse_os_release_value(&os_release, "PRETTY_NAME")
-        .or_else(|| parse_os_release_value(&os_release, "NAME"))
-        .unwrap_or_else(|| "Unknown Linux".to_string());
-    let distro_id =
-        parse_os_release_value(&os_release, "ID").unwrap_or_else(|| "unknown".to_string());
-    let distro_version = parse_os_release_value(&os_release, "VERSION_ID").unwrap_or_default();
-    let kernel = command_output("uname", &["-r"])
-        .await
-        .unwrap_or_else(|| "unknown".to_string());
-    let hostname = command_output("hostname", &[])
-        .await
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let hyprland_available = command_exists("hyprctl").await;
-    let active_workspace = if hyprland_available {
-        command_output("hyprctl", &["activeworkspace", "-j"])
-            .await
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-            .and_then(|json| json.get("id").and_then(|v| v.as_u64()))
-            .unwrap_or(0)
-    } else {
-        0
-    };
-    let workspace_count = if hyprland_available {
-        command_output("hyprctl", &["workspaces", "-j"])
-            .await
-            .and_then(|raw| serde_json::from_str::<Vec<Value>>(&raw).ok())
-            .map(|arr| arr.len())
-            .unwrap_or(0)
-    } else {
-        0
-    };
-
-    let known_commands = [
-        "code",
-        "code-oss",
-        "codium",
-        "codex",
-        "kiro-cli",
-        "firefox",
-        "chromium",
-        "google-chrome-stable",
-        "kitty",
-        "wezterm",
-        "thunderbird",
-        "discord",
-        "slack",
-        "telegram-desktop",
-        "swww",
-        "hyprpaper",
-        "caelestia",
-        "grim",
-        "hyprshot",
-        "tesseract",
-        "wtype",
-        "ydotool",
-        "wlrctl",
-        "hyprctl",
-        "flatpak",
-        "pacman",
-        "yay",
-        "paru",
-    ];
-    let mut commands = serde_json::Map::new();
-    for command in known_commands {
-        commands.insert(
-            command.to_string(),
-            Value::Bool(command_exists(command).await),
-        );
-    }
-
-    let command_enabled = |name: &str| -> bool {
-        commands
-            .get(name)
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-    };
-
-    let wallpaper_backends = [
-        ("swww", "swww"),
-        ("hyprpaper", "hyprpaper"),
-        ("caelestia", "caelestia"),
-    ]
-    .iter()
-    .filter_map(|(cmd, label)| command_enabled(cmd).then_some((*label).to_string()))
-    .collect::<Vec<String>>();
-
-    let screenshot_backends = [("grim", "grim"), ("hyprshot", "hyprshot")]
-        .iter()
-        .filter_map(|(cmd, label)| command_enabled(cmd).then_some((*label).to_string()))
-        .collect::<Vec<String>>();
-
-    let input_backends = [
-        ("wtype", "wtype"),
-        ("ydotool", "ydotool"),
-        ("wlrctl", "wlrctl"),
-    ]
-    .iter()
-    .filter_map(|(cmd, label)| command_enabled(cmd).then_some((*label).to_string()))
-    .collect::<Vec<String>>();
-
-    let home = std::env::var("HOME").unwrap_or_default();
-    let downloads = format!("{home}/Downloads");
-    let pictures = format!("{home}/Pictures");
-    let documents = format!("{home}/Documents");
-
-    json!({
-        "scanned_at": chrono::Utc::now().timestamp(),
-        "platform": {
-            "distro_name": distro_name,
-            "distro_id": distro_id,
-            "distro_version": distro_version,
-            "kernel": kernel,
-            "arch": std::env::consts::ARCH
-        },
-        "user": {
-            "id": user_id,
-            "name": std::env::var("USER").unwrap_or_else(|_| user_id.to_string()),
-            "home": std::env::var("HOME").unwrap_or_default(),
-            "shell": std::env::var("SHELL").unwrap_or_default(),
-            "hostname": hostname
-        },
-        "desktop": {
-            "session": std::env::var("XDG_SESSION_TYPE").unwrap_or_default(),
-            "desktop_env": std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default(),
-            "hyprland_available": hyprland_available,
-            "active_workspace": active_workspace,
-            "workspace_count": workspace_count
-        },
-        "commands": commands,
-        "paths": {
-            "home": home,
-            "downloads": downloads,
-            "pictures": pictures,
-            "documents": documents
-        },
-        "capabilities": {
-            "wallpaper_backends": wallpaper_backends,
-            "screenshot_backends": screenshot_backends,
-            "input_backends": input_backends,
-            "ocr_available": command_enabled("tesseract")
-        }
-    })
-}
-
-async fn collect_deep_system_profile(user_id: &str) -> Value {
-    let mut base = collect_system_profile(user_id).await;
-    let home = base
-        .pointer("/user/home")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-
-    let deep = tokio::task::spawn_blocking(move || collect_deep_scan_sync(&home))
-        .await
-        .unwrap_or_else(|_| json!({"error": "deep scan failed"}));
-
-    if let Some(obj) = base.as_object_mut() {
-        obj.insert("deep_scan".to_string(), deep);
-    }
-    base
-}
-
-fn collect_deep_scan_sync(home: &str) -> Value {
-    let home_path = std::path::PathBuf::from(home);
-    let config_path = home_path.join(".config");
-    let hypr_path = config_path.join("hypr");
-
-    let top_home = list_directory_entries(&home_path, 220);
-    let config_entries = list_directory_entries(&config_path, 260);
-    let projects = find_project_roots(&home_path, 2, 320);
-    let (hypr_main, hypr_binds, hypr_exec_once, hypr_workspace_rules) =
-        parse_hypr_config(&hypr_path);
-    let (pkg_explicit_count, pkg_explicit_sample) = pacman_query_lines(&["-Qqe"], 160);
-    let (pkg_aur_count, pkg_aur_sample) = pacman_query_lines(&["-Qm"], 120);
-    let (launchers, launcher_commands) = desktop_entries(&home_path, 320);
-    let (history_top, history_recent) = shell_history_summary(&home_path, 4500);
-
-    json!({
-        "scanned_at": chrono::Utc::now().timestamp(),
-        "home_inventory": {
-            "top_level": top_home,
-            "config_entries": config_entries,
-            "project_roots": projects
-        },
-        "hyprland": {
-            "main_config": hypr_main,
-            "binds_sample": hypr_binds,
-            "exec_once_sample": hypr_exec_once,
-            "workspace_rules_sample": hypr_workspace_rules
-        },
-        "packages": {
-            "pacman_explicit_count": pkg_explicit_count,
-            "pacman_explicit_sample": pkg_explicit_sample,
-            "aur_count": pkg_aur_count,
-            "aur_sample": pkg_aur_sample
-        },
-        "desktop_apps": {
-            "launchers_sample": launchers,
-            "launcher_commands_sample": launcher_commands
-        },
-        "usage": {
-            "shell_history_top": history_top,
-            "recent_commands_sample": history_recent
-        }
-    })
-}
-
-fn list_directory_entries(path: &std::path::Path, limit: usize) -> Vec<Value> {
-    let Ok(read_dir) = std::fs::read_dir(path) else {
-        return Vec::new();
-    };
-    let mut rows = Vec::new();
-    for entry in read_dir.flatten().take(limit) {
-        let file_name = entry.file_name().to_string_lossy().to_string();
-        let meta = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        rows.push(json!({
-            "name": file_name,
-            "kind": if meta.is_dir() { "dir" } else { "file" },
-            "bytes": if meta.is_file() { meta.len() } else { 0 }
-        }));
-    }
-    rows.sort_by(|a, b| {
-        let an = a.get("name").and_then(|v| v.as_str()).unwrap_or_default();
-        let bn = b.get("name").and_then(|v| v.as_str()).unwrap_or_default();
-        an.cmp(bn)
-    });
-    rows
-}
-
-fn find_project_roots(home: &std::path::Path, max_depth: usize, max_dirs: usize) -> Vec<String> {
-    let mut stack = vec![(home.to_path_buf(), 0usize)];
-    let mut visited = 0usize;
-    let mut roots = Vec::new();
-
-    while let Some((dir, depth)) = stack.pop() {
-        if visited >= max_dirs {
-            break;
-        }
-        visited += 1;
-        if dir.join(".git").exists() {
-            roots.push(dir.to_string_lossy().to_string());
-            if roots.len() >= 120 {
-                break;
-            }
-        }
-        if depth >= max_depth {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten().take(80) {
-            let p = entry.path();
-            if !p.is_dir() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') && name != ".config" {
-                continue;
-            }
-            stack.push((p, depth + 1));
-        }
-    }
-
-    roots.sort();
-    roots
-}
-
-fn parse_hypr_config(
-    hypr_dir: &std::path::Path,
-) -> (String, Vec<String>, Vec<String>, Vec<String>) {
-    let main = hypr_dir.join("hyprland.conf");
-    if !main.exists() {
-        return (String::new(), Vec::new(), Vec::new(), Vec::new());
-    }
-    let content = std::fs::read_to_string(&main).unwrap_or_default();
-    let mut binds = Vec::new();
-    let mut exec_once = Vec::new();
-    let mut workspace_rules = Vec::new();
-
-    for line in content.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        if line.starts_with('#') {
-            continue;
-        }
-        if (line.starts_with("bind") || line.starts_with("binde") || line.starts_with("bindm"))
-            && binds.len() < 120
-        {
-            binds.push(line.to_string());
-        }
-        if line.starts_with("exec-once") && exec_once.len() < 80 {
-            exec_once.push(line.to_string());
-        }
-        if line.starts_with("workspace") && workspace_rules.len() < 80 {
-            workspace_rules.push(line.to_string());
-        }
-    }
-
-    (
-        main.to_string_lossy().to_string(),
-        binds,
-        exec_once,
-        workspace_rules,
-    )
-}
-
-fn pacman_query_lines(args: &[&str], sample_limit: usize) -> (usize, Vec<String>) {
-    let output = std::process::Command::new("pacman").args(args).output();
-    let Ok(output) = output else {
-        return (0, Vec::new());
-    };
-    if !output.status.success() {
-        return (0, Vec::new());
-    }
-    let lines = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<String>>();
-    let count = lines.len();
-    let sample = lines
-        .into_iter()
-        .take(sample_limit)
-        .collect::<Vec<String>>();
-    (count, sample)
-}
-
-fn desktop_entries(home: &std::path::Path, limit: usize) -> (Vec<Value>, Vec<String>) {
-    let mut desktop_files = Vec::new();
-    for dir in [
-        std::path::PathBuf::from("/usr/share/applications"),
-        home.join(".local/share/applications"),
-    ] {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("desktop") {
-                    desktop_files.push(path);
-                }
-            }
-        }
-    }
-    desktop_files.sort();
-    desktop_files.truncate(limit);
-
-    let mut launchers = Vec::new();
-    let mut commands = std::collections::BTreeSet::new();
-    for file in desktop_files {
-        if let Some((name, exec, command_token)) = parse_desktop_file(&file) {
-            launchers.push(json!({
-                "name": name,
-                "exec": exec,
-                "desktop_file": file.to_string_lossy().to_string()
-            }));
-            commands.insert(command_token);
-        }
-    }
-
-    (
-        launchers.into_iter().take(220).collect(),
-        commands.into_iter().take(220).collect(),
-    )
-}
-
-fn parse_desktop_file(file: &std::path::Path) -> Option<(String, String, String)> {
-    let content = std::fs::read_to_string(file).ok()?;
-    let mut name = None::<String>;
-    let mut exec = None::<String>;
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with("Name=") && name.is_none() {
-            name = Some(line.trim_start_matches("Name=").to_string());
-        } else if line.starts_with("Exec=") && exec.is_none() {
-            exec = Some(line.trim_start_matches("Exec=").to_string());
-        }
-        if name.is_some() && exec.is_some() {
-            break;
-        }
-    }
-    let name = name?;
-    let exec = exec?;
-    let cmd = exec
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .trim_matches('"')
-        .replace("%u", "")
-        .replace("%U", "")
-        .replace("%f", "")
-        .replace("%F", "");
-    if cmd.is_empty() {
-        return None;
-    }
-    Some((name, exec, cmd))
-}
-
-fn shell_history_summary(home: &std::path::Path, max_lines: usize) -> (Vec<Value>, Vec<String>) {
-    let files = [
-        home.join(".bash_history"),
-        home.join(".zsh_history"),
-        home.join(".local/share/fish/fish_history"),
-    ];
-    let mut all = Vec::new();
-
-    for file in files {
-        if !file.exists() {
-            continue;
-        }
-        let content = std::fs::read_to_string(&file).unwrap_or_default();
-        for raw in content.lines().take(max_lines) {
-            let line = normalize_history_line(raw);
-            if !line.is_empty() {
-                all.push(line);
-            }
-        }
-    }
-
-    let recent = all.iter().rev().take(30).rev().cloned().collect::<Vec<_>>();
-    let mut freq = std::collections::HashMap::<String, usize>::new();
-    for line in &all {
-        let cmd = line.split_whitespace().next().unwrap_or("").to_string();
-        if !cmd.is_empty() {
-            *freq.entry(cmd).or_insert(0) += 1;
-        }
-    }
-    let mut items = freq.into_iter().collect::<Vec<(String, usize)>>();
-    items.sort_by(|a, b| b.1.cmp(&a.1));
-    let top = items
-        .into_iter()
-        .take(30)
-        .map(|(cmd, count)| json!({"cmd": cmd, "count": count}))
-        .collect::<Vec<Value>>();
-
-    (top, recent)
-}
-
-fn normalize_history_line(line: &str) -> String {
-    let trimmed = line.trim();
-    if trimmed.starts_with(": ") && trimmed.contains(';') {
-        if let Some((_, cmd)) = trimmed.split_once(';') {
-            return cmd.trim().to_string();
-        }
-    }
-    if let Some(cmd) = trimmed.strip_prefix("- cmd: ") {
-        return cmd.trim().to_string();
-    }
-    trimmed.to_string()
-}
-
-fn parse_os_release_value(content: &str, key: &str) -> Option<String> {
-    content
-        .lines()
-        .find_map(|line| line.strip_prefix(&format!("{key}=")).map(str::to_string))
-        .map(|value| value.trim_matches('"').to_string())
-}
-
-async fn command_exists(command: &str) -> bool {
-    Command::new("which")
-        .arg(command)
-        .output()
-        .await
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-async fn command_output(command: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(command).args(args).output().await.ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn discover_souls(souls_dir: &str) -> Vec<String> {
-    let mut souls = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(souls_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("yaml") {
-                continue;
-            }
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                souls.push(stem.to_string());
-            }
-        }
-    }
-    souls.sort();
-    souls
-}
-
 fn next_thread_id(state: &AgentOsState) -> String {
     let max_id = state
         .task_threads
@@ -5653,94 +4159,6 @@ fn next_thread_id(state: &AgentOsState) -> String {
         .max()
         .unwrap_or(0);
     format!("task-{}", max_id + 1)
-}
-
-fn handle_task_command(input: &str, state: &mut AgentOsState) -> bool {
-    let rest = input.strip_prefix("/task ").unwrap_or("").trim();
-    if rest.is_empty() {
-        println!("Usage: /task new <title> | /task list | /task switch <id> | /task close <id>");
-        return false;
-    }
-
-    if rest == "list" {
-        println!("\n🧵 Task Threads:");
-        for thread in &state.task_threads {
-            let marker = if thread.id == state.active_thread_id {
-                "*"
-            } else {
-                " "
-            };
-            let status = if thread.archived {
-                "archived"
-            } else {
-                "active"
-            };
-            println!("  {} {} - {} [{}]", marker, thread.id, thread.title, status);
-        }
-        println!();
-        return false;
-    }
-
-    if let Some(title) = rest.strip_prefix("new ").map(str::trim) {
-        let title = if title.is_empty() {
-            "Untitled Task"
-        } else {
-            title
-        };
-        let id = next_thread_id(state);
-        state
-            .task_threads
-            .push(TaskThread::new(id.clone(), title.to_string()));
-        state.active_thread_id = id.clone();
-        println!("✅ Created thread '{}' ({})", title, id);
-        return true;
-    }
-
-    if let Some(id) = rest.strip_prefix("switch ").map(str::trim) {
-        let found = state
-            .task_threads
-            .iter()
-            .find(|thread| thread.id == id && !thread.archived)
-            .map(|thread| thread.id.clone());
-        if let Some(thread_id) = found {
-            state.active_thread_id = thread_id.clone();
-            touch_active_thread(state);
-            println!("✅ Switched to thread {}", thread_id);
-            return true;
-        }
-        println!("❌ Thread '{}' not found or archived", id);
-        return false;
-    }
-
-    if let Some(id) = rest.strip_prefix("close ").map(str::trim) {
-        let mut changed = false;
-        for thread in &mut state.task_threads {
-            if thread.id == id {
-                thread.archived = true;
-                thread.updated_at = chrono::Utc::now().timestamp();
-                changed = true;
-                break;
-            }
-        }
-        if !changed {
-            println!("❌ Thread '{}' not found", id);
-            return false;
-        }
-        if state.active_thread_id == id {
-            if let Some(next_active) = state.task_threads.iter().find(|t| !t.archived) {
-                state.active_thread_id = next_active.id.clone();
-            } else {
-                let fallback = TaskThread::new(next_thread_id(state), "Main".to_string());
-                state.active_thread_id = fallback.id.clone();
-                state.task_threads.push(fallback);
-            }
-        }
-        println!("✅ Archived thread {}", id);
-        return true;
-    }
-
-    println!("Usage: /task new <title> | /task list | /task switch <id> | /task close <id>");
-    false
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -6278,15 +4696,7 @@ fn reconcile_supervisor_after_restart(state: &mut AgentOsState) -> usize {
 fn print_supervisor_queue(state: &AgentOsState) {
     println!("\n🧰 Supervisor Queue");
     println!(
-        "  actions: queue status | queue prune [N] | queue stop <id>|all | queue retry <id>|failed|completed|all"
-    );
-    println!(
-        "  auto-run: {}",
-        if state.supervisor.auto_run {
-            "on"
-        } else {
-            "off"
-        }
+        "  actions: queue status | queue add <prompt> | queue run | queue clear"
     );
     if state.supervisor.tasks.is_empty() {
         println!("  empty");
@@ -6348,12 +4758,7 @@ fn print_supervisor_queue_status(state: &AgentOsState) {
 
     println!("\n📌 Supervisor Queue Status");
     println!(
-        "  auto-run: {} | queued={} running={} done={} failed={} cancelled={}",
-        if state.supervisor.auto_run {
-            "on"
-        } else {
-            "off"
-        },
+        "  queued={} running={} done={} failed={} cancelled={}",
         queued,
         running,
         completed,
@@ -6451,25 +4856,6 @@ fn thread_session_key(base_session_key: &str, thread_id: &str) -> String {
     format!("{base_session_key}::thread::{thread_id}")
 }
 
-async fn switch_soul(
-    soul_id: &str,
-    runtime_registry: &Arc<RuntimeRegistryAdapter>,
-    agent_tools: &HashSet<String>,
-) -> Result<(SoulProfile, HashSet<String>), String> {
-    let profile = load_soul_profile(soul_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let resolved = resolve_allowed_tools(&profile.allowed_tools, agent_tools);
-    if resolved.is_empty() {
-        return Err(format!(
-            "Soul '{}' has no tools allowed after filtering",
-            soul_id
-        ));
-    }
-    runtime_registry.set_allowed_tools(resolved.clone());
-    Ok((profile, resolved))
-}
-
 fn augment_system_prompt_for_turn(
     base_prompt: &str,
     profile: &Value,
@@ -6557,22 +4943,36 @@ fn augment_system_prompt_for_turn(
                 .map(str::to_string)
         })
         .unwrap_or_default();
+    let installed_packages = capability_registry
+        .pointer("/packages/total_count")
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            profile
+                .pointer("/deep_scan/packages/total_count")
+                .and_then(|v| v.as_u64())
+        })
+        .unwrap_or(0);
 
     let mut tools = allowed_tools.iter().cloned().collect::<Vec<String>>();
     tools.sort();
-    let policy_block = match autonomy_mode {
-        AutonomyMode::PromptFirst => {
-            "Execution policy:\n1) Perform actions using tools, not explanation.\n2) You control fallback order dynamically; adapt tool strategy from observed failures.\n3) Prefer one decisive tool call at a time with valid JSON input.\n4) For opening local apps, prefer desktop.launch_app before proc.spawn/open_url and use launcher_commands/vscode_hint.\n5) End with concise result and what changed.\n6) Stop only when truly blocked after trying multiple tool paths."
-        }
-        AutonomyMode::Guarded => {
-            "Execution policy:\n1) Perform actions using tools, not explanation.\n2) If a tool fails, choose an alternative backend/tool and continue.\n3) For opening local apps, try desktop.launch_app first, then proc.spawn as fallback; use launcher_commands/vscode_hint.\n4) End with concise result and what changed.\n5) Only stop as blocked after trying alternatives available in runtime context."
+    let policy_block = if strict_workflow_enabled() {
+        "Strict workflow:\n1) Observe first (screen/window/state) before acting on GUI tasks.\n2) Plan short and execute using tools, not explanation-only text.\n3) Prefer one decisive tool call at a time with valid JSON input.\n4) After each action, verify with tools (screen/file/process checks) and continue until done.\n5) Ask for user permission before high-impact or destructive actions.\n6) Stop only when truly blocked and report exact blocker + next best option."
+    } else {
+        match autonomy_mode {
+            AutonomyMode::PromptFirst => {
+                "Execution policy:\n1) Perform actions using tools, not explanation.\n2) You control fallback order dynamically; adapt tool strategy from observed failures.\n3) Prefer one decisive tool call at a time with valid JSON input.\n4) For opening local apps, prefer desktop.launch_app before proc.spawn/open_url and use launcher_commands/vscode_hint.\n5) End with concise result and what changed.\n6) Stop only when truly blocked after trying multiple tool paths."
+            }
+            AutonomyMode::Guarded => {
+                "Execution policy:\n1) Perform actions using tools, not explanation.\n2) If a tool fails, choose an alternative backend/tool and continue.\n3) For opening local apps, try desktop.launch_app first, then proc.spawn as fallback; use launcher_commands/vscode_hint.\n4) End with concise result and what changed.\n5) Only stop as blocked after trying alternatives available in runtime context."
+            }
         }
     };
 
     format!(
-        "{}\n\nRuntime context:\n- autonomy_mode: {}\n- capability_registry_generated_at: {}\n- distro: {}\n- kernel: {}\n- active_workspace: {}\n- wallpaper_backends: {}\n- screenshot_backends: {}\n- input_backends: {}\n- vscode_hint: {}\n- launcher_commands: {}\n- preferred_launchers: {}\n- known_projects: {}\n- known_downloads_dir: {}\n- allowed_tools_now: {}\n\n{}",
+        "{}\n\nRuntime context:\n- autonomy_mode: {}\n- workflow_mode: {}\n- capability_registry_generated_at: {}\n- distro: {}\n- kernel: {}\n- active_workspace: {}\n- wallpaper_backends: {}\n- screenshot_backends: {}\n- input_backends: {}\n- vscode_hint: {}\n- launcher_commands: {}\n- preferred_launchers: {}\n- known_projects: {}\n- known_downloads_dir: {}\n- installed_packages: {}\n- allowed_tools_now: {}\n\n{}",
         base_prompt,
         autonomy_mode.as_str(),
+        if strict_workflow_enabled() { "strict" } else { "legacy" },
         registry_generated_at,
         distro,
         kernel,
@@ -6585,6 +4985,7 @@ fn augment_system_prompt_for_turn(
         preferred_launchers,
         project_hints,
         downloads_dir,
+        installed_packages,
         tools.join(", "),
         policy_block
     )
@@ -6817,73 +5218,6 @@ fn fallback_playbook_for_input(input: &str, allowed: &HashSet<String>) -> String
     } else {
         lines.join("\n")
     }
-}
-
-fn auto_select_soul_id(input: &str, available_souls: &[String]) -> Option<String> {
-    let lower = input.to_lowercase();
-    let candidates = [
-        (
-            "hyprland_operator",
-            [
-                "workspace",
-                "hypr",
-                "window",
-                "wallpaper",
-                "click",
-                "type",
-                "press",
-                "shortcut",
-                "screenshot",
-                "screen",
-                "ocr",
-                "find text",
-            ]
-            .as_slice(),
-        ),
-        (
-            "coder_engineer",
-            [
-                "code", "compile", "build", "run", "execute", "refactor", "debug", "python",
-                "rust", "script", "file", "folder", "project",
-            ]
-            .as_slice(),
-        ),
-        (
-            "qa_tester",
-            ["test", "bug", "failure", "regression"].as_slice(),
-        ),
-        (
-            "devops_operator",
-            ["docker", "deploy", "k8s", "server", "infra"].as_slice(),
-        ),
-        (
-            "browser_researcher",
-            ["search", "browser", "web", "lookup"].as_slice(),
-        ),
-        (
-            "communication_assistant",
-            ["telegram", "whatsapp", "discord", "slack", "message"].as_slice(),
-        ),
-        ("mail_assistant", ["mail", "gmail", "email"].as_slice()),
-        (
-            "project_manager",
-            ["plan", "roadmap", "task list", "milestone"].as_slice(),
-        ),
-        (
-            "cleanup_agent",
-            ["clean", "organize", "tidy", "delete old"].as_slice(),
-        ),
-    ];
-
-    for (soul, tokens) in candidates {
-        if tokens.iter().any(|token| lower.contains(token))
-            && available_souls.iter().any(|candidate| candidate == soul)
-        {
-            return Some(soul.to_string());
-        }
-    }
-
-    None
 }
 
 // Adapter for ToolDispatcher
@@ -7261,22 +5595,6 @@ mod reliability_policy_tests {
                 .unwrap_or(&0),
             1
         );
-    }
-
-    #[test]
-    fn autonomy_mode_summary_formats_metrics() {
-        let mut metrics = AutonomyModeMetrics::default();
-        metrics.runs = 2;
-        metrics.successes = 1;
-        metrics.failures = 1;
-        metrics.total_duration_ms = 3000;
-        metrics.total_fallback_attempts = 3;
-        metrics.stop_codes.insert("STOP_NONE".to_string(), 1);
-
-        let line = autonomy_mode_summary("prompt_first", &metrics);
-        assert!(line.contains("prompt_first"));
-        assert!(line.contains("succ%=50.0"));
-        assert!(line.contains("avg_ms=1500"));
     }
 
     #[test]

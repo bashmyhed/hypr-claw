@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Notify;
 
-use super::file_classifier::{classify_file, FileClass, SkipReason};
+use super::file_classifier::{classify_file_with_size, FileClass, SkipReason};
 use super::policy::ScanPolicy;
 use super::progress::ScanProgress;
 use super::resource::ResourceMonitor;
@@ -78,6 +78,13 @@ async fn scan_recursive(
     depth: usize,
     interrupt: Arc<Notify>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Stop once scan budgets are reached.
+    if progress.files_scanned_count() >= policy.max_files_total
+        || progress.dirs_scanned_count() >= policy.max_dirs_total
+    {
+        return Ok(());
+    }
+
     // Check interrupt
     if Arc::strong_count(&interrupt) > 1 {
         // Simple check - in production, use a proper cancellation token
@@ -119,7 +126,19 @@ async fn scan_recursive(
     };
 
     let mut entries = entries;
+    let mut entries_seen = 0usize;
     while let Ok(Some(entry)) = entries.next_entry().await {
+        if entries_seen >= policy.max_entries_per_dir {
+            break;
+        }
+        entries_seen += 1;
+
+        if progress.files_scanned_count() >= policy.max_files_total
+            || progress.dirs_scanned_count() >= policy.max_dirs_total
+        {
+            return Ok(());
+        }
+
         // Check interrupt
         tokio::select! {
             _ = interrupt.notified() => return Ok(()),
@@ -127,8 +146,12 @@ async fn scan_recursive(
         }
 
         let path = entry.path();
+        let file_type = match entry.file_type().await {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
 
-        if path.is_dir() {
+        if file_type.is_dir() {
             scan_recursive(
                 &path,
                 policy,
@@ -139,7 +162,7 @@ async fn scan_recursive(
                 interrupt.clone(),
             )
             .await?;
-        } else if path.is_file() {
+        } else if file_type.is_file() {
             process_file(&path, policy, progress, scanned_files).await;
         }
     }
@@ -161,7 +184,7 @@ async fn process_file(
     let size = metadata.len();
 
     // Classify file
-    let file_class = match classify_file(path, policy.max_file_size) {
+    let file_class = match classify_file_with_size(path, size, policy.max_file_size) {
         Ok(c) => c,
         Err(_) => {
             progress.increment_skipped_excluded();

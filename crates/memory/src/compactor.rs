@@ -3,6 +3,7 @@ use crate::types::*;
 const MAX_RECENT_HISTORY: usize = 50;
 const MAX_TOTAL_TOKENS: usize = 100_000;
 const SUMMARY_THRESHOLD: usize = 30;
+const TEMP_CONTEXT_RETENTION_SECS: i64 = 3 * 24 * 60 * 60;
 
 pub struct ContextCompactor;
 
@@ -22,6 +23,31 @@ impl ContextCompactor {
     fn compact_history(context: &mut ContextData) -> bool {
         let history = &mut context.recent_history;
         let mut compacted = false;
+
+        // Time-based compaction: archive temporary context older than a few days.
+        let cutoff = chrono::Utc::now().timestamp() - TEMP_CONTEXT_RETENTION_SECS;
+        let stale_count = history
+            .iter()
+            .take_while(|entry| entry.timestamp > 0 && entry.timestamp < cutoff)
+            .count();
+        if stale_count > 0 {
+            let stale_entries: Vec<_> = history.drain(..stale_count).collect();
+            let summary = format!(
+                "Archived temporary context (older than {} days):\n{}",
+                TEMP_CONTEXT_RETENTION_SECS / 86_400,
+                Self::summarize_entries(&stale_entries)
+            );
+            context.long_term_summary = if context.long_term_summary.is_empty() {
+                summary
+            } else {
+                format!("{}\n\n{}", context.long_term_summary, summary)
+            };
+            tracing::info!(
+                "Time-based compaction: archived {} old entries",
+                stale_count
+            );
+            compacted = true;
+        }
 
         // If history is too long, summarize older entries
         if history.len() > MAX_RECENT_HISTORY {

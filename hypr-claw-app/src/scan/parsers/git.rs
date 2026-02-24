@@ -15,7 +15,13 @@ impl ConfigParser for GitParser {
 
     fn can_parse(&self, path: &Path) -> bool {
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            name == ".gitconfig" || (name == "config" && path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) == Some("git"))
+            name == ".gitconfig"
+                || (name == "config"
+                    && path
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .and_then(|n| n.to_str())
+                        == Some("git"))
         } else {
             false
         }
@@ -75,7 +81,10 @@ fn parse_git_config(content: &str) -> Value {
             // Start tracking remote
             if section.starts_with("remote ") {
                 current_remote = Some(HashMap::new());
-                if let Some(name) = section.strip_prefix("remote \"").and_then(|s| s.strip_suffix('"')) {
+                if let Some(name) = section
+                    .strip_prefix("remote \"")
+                    .and_then(|s| s.strip_suffix('"'))
+                {
                     if let Some(ref mut remote) = current_remote {
                         remote.insert("name".to_string(), name.to_string());
                     }
@@ -161,6 +170,9 @@ mod tests {
         assert_eq!(result["core"]["editor"], "nvim");
         assert_eq!(result["aliases"]["st"], "status");
         assert_eq!(result["remotes"][0]["name"], "origin");
-        assert!(result["remotes"][0]["url"].as_str().unwrap().contains("github.com"));
+        assert!(result["remotes"][0]["url"]
+            .as_str()
+            .unwrap()
+            .contains("github.com"));
     }
 }

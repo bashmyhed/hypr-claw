@@ -10,6 +10,9 @@ pub struct ScanPolicy {
     pub excluded_paths: Vec<PathBuf>,
     pub standard_depth: usize,
     pub max_file_size: u64,
+    pub max_files_total: usize,
+    pub max_dirs_total: usize,
+    pub max_entries_per_dir: usize,
     pub exclude_patterns: Vec<String>,
     pub scan_sensitive: bool,
 }
@@ -19,8 +22,11 @@ impl Default for ScanPolicy {
         Self {
             included_paths: Vec::new(),
             excluded_paths: Vec::new(),
-            standard_depth: 4,
+            standard_depth: 3,
             max_file_size: 100 * 1024 * 1024, // 100MB
+            max_files_total: 15_000,
+            max_dirs_total: 4_000,
+            max_entries_per_dir: 256,
             exclude_patterns: default_exclude_patterns(),
             scan_sensitive: false,
         }
@@ -109,8 +115,11 @@ impl ScanPolicy {
         Ok(ScanPolicy {
             included_paths,
             excluded_paths,
-            standard_depth: 4,
+            standard_depth: 3,
             max_file_size: 100 * 1024 * 1024,
+            max_files_total: 15_000,
+            max_dirs_total: 4_000,
+            max_entries_per_dir: 256,
             exclude_patterns: default_exclude_patterns(),
             scan_sensitive,
         })
@@ -173,8 +182,11 @@ mod tests {
     #[test]
     fn test_default_policy() {
         let policy = ScanPolicy::default();
-        assert_eq!(policy.standard_depth, 4);
+        assert_eq!(policy.standard_depth, 3);
         assert_eq!(policy.max_file_size, 100 * 1024 * 1024);
+        assert_eq!(policy.max_files_total, 15_000);
+        assert_eq!(policy.max_dirs_total, 4_000);
+        assert_eq!(policy.max_entries_per_dir, 256);
         assert!(!policy.scan_sensitive);
         assert!(!policy.exclude_patterns.is_empty());
     }

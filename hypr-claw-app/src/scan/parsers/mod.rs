@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 pub mod git;
@@ -14,10 +14,10 @@ pub use shell::ShellParser;
 pub trait ConfigParser: Send + Sync {
     /// Parser name for identification
     fn name(&self) -> &'static str;
-    
+
     /// Check if this parser can handle the given file
     fn can_parse(&self, path: &Path) -> bool;
-    
+
     /// Parse the config file and return structured data
     fn parse(&self, path: &Path) -> Result<ParsedConfig, ParseError>;
 }
@@ -139,7 +139,9 @@ impl ParseResult {
 }
 
 /// Helper to partition results into success and failure
-pub fn partition_results(results: Vec<ParseResult>) -> (Vec<ParsedConfig>, Vec<(PathBuf, ParseError)>) {
+pub fn partition_results(
+    results: Vec<ParseResult>,
+) -> (Vec<ParsedConfig>, Vec<(PathBuf, ParseError)>) {
     let mut success = Vec::new();
     let mut failed = Vec::new();
 

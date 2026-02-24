@@ -274,6 +274,7 @@ pub struct ProcKillTool;
 pub struct ProcListTool;
 pub struct DesktopOpenUrlTool;
 pub struct DesktopLaunchAppTool;
+pub struct DesktopLaunchAppAndWaitTextTool;
 pub struct DesktopSearchWebTool;
 pub struct DesktopOpenGmailTool;
 pub struct DesktopTypeTextTool;
@@ -288,6 +289,7 @@ pub struct DesktopClickAtTool;
 pub struct DesktopOcrScreenTool;
 pub struct DesktopFindTextTool;
 pub struct DesktopClickTextTool;
+pub struct DesktopWaitForTextTool;
 
 #[async_trait]
 impl Tool for ProcSpawnTool {
@@ -471,6 +473,65 @@ impl Tool for DesktopLaunchAppTool {
         Ok(ToolResult {
             success: true,
             output: Some(json!({"app": app, "pid": pid})),
+            error: None,
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for DesktopLaunchAppAndWaitTextTool {
+    fn name(&self) -> &'static str {
+        "desktop.launch_app_and_wait_text"
+    }
+    fn description(&self) -> &'static str {
+        "Launch an app, then wait until text appears on screen"
+    }
+    fn permission_tier(&self) -> PermissionTier {
+        PermissionTier::Execute
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "app": {"type": "string"},
+                "args": {"type": "array", "items": {"type": "string"}},
+                "query": {"type": "string"},
+                "timeout_ms": {"type": "number"},
+                "poll_interval_ms": {"type": "number"},
+                "case_sensitive": {"type": "boolean"},
+                "lang": {"type": "string"}
+            },
+            "required": ["app", "query"],
+            "additionalProperties": false
+        })
+    }
+    async fn execute(&self, _ctx: ExecutionContext, input: Value) -> Result<ToolResult, ToolError> {
+        let app = required_str(&input, "app")?;
+        let query = required_str(&input, "query")?;
+        let args: Vec<String> = input["args"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let timeout_ms = input["timeout_ms"].as_u64().unwrap_or(10_000);
+        let poll_interval_ms = input["poll_interval_ms"].as_u64().unwrap_or(500);
+        let case_sensitive = input["case_sensitive"].as_bool().unwrap_or(false);
+        let lang = input["lang"].as_str();
+
+        let pid = desktop::launch_app(app, &args)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        let found =
+            desktop::wait_for_text(query, case_sensitive, timeout_ms, poll_interval_ms, lang)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        Ok(ToolResult {
+            success: true,
+            output: Some(json!({"app": app, "pid": pid, "query": query, "match": found})),
             error: None,
         })
     }
@@ -972,6 +1033,50 @@ impl Tool for DesktopClickTextTool {
         Ok(ToolResult {
             success: true,
             output: Some(json!({"query": query, "target": target, "button": button})),
+            error: None,
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for DesktopWaitForTextTool {
+    fn name(&self) -> &'static str {
+        "desktop.wait_for_text"
+    }
+    fn description(&self) -> &'static str {
+        "Wait until target text appears on screen using OCR"
+    }
+    fn permission_tier(&self) -> PermissionTier {
+        PermissionTier::Read
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "timeout_ms": {"type": "number"},
+                "poll_interval_ms": {"type": "number"},
+                "case_sensitive": {"type": "boolean"},
+                "lang": {"type": "string"}
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        })
+    }
+    async fn execute(&self, _ctx: ExecutionContext, input: Value) -> Result<ToolResult, ToolError> {
+        let query = required_str(&input, "query")?;
+        let timeout_ms = input["timeout_ms"].as_u64().unwrap_or(10_000);
+        let poll_interval_ms = input["poll_interval_ms"].as_u64().unwrap_or(500);
+        let case_sensitive = input["case_sensitive"].as_bool().unwrap_or(false);
+        let lang = input["lang"].as_str();
+
+        let found =
+            desktop::wait_for_text(query, case_sensitive, timeout_ms, poll_interval_ms, lang)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        Ok(ToolResult {
+            success: true,
+            output: Some(json!({"query": query, "match": found})),
             error: None,
         })
     }

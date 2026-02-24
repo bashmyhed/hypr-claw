@@ -47,9 +47,7 @@ pub fn classify_directory(path: &Path) -> super::discovery::DiscoveredDirectory 
         // Logs
         ".log" | "logs" => (DirectoryCategory::Logs, SensitivityLevel::Public),
         // Development
-        _ if is_project_directory(path) => {
-            (DirectoryCategory::Projects, SensitivityLevel::Public)
-        }
+        _ if is_project_directory(path) => (DirectoryCategory::Projects, SensitivityLevel::Public),
         // Content-based
         _ => classify_by_content(path),
     };

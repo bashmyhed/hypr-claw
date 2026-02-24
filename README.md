@@ -1,140 +1,108 @@
 # Hypr-Claw
 
-Hypr-Claw is a local, tool-driven OS assistant for Linux with Hyprland-aware controls, persistent memory, and a REPL workflow.
+Hypr-Claw is a local Linux OS assistant focused on Hyprland-style desktop control. The model decides actions from user prompts and executes tools to work like a human operator: observe screen, move cursor, type, open apps, read content, and report results.
 
-## Current State
+## Team Context
 
-This repository now focuses on a cleaner production layout:
+This project is being built by a core team of three people:
 
-- Core docs are kept in `docs/`
-- Root status/progress markdown files were removed
-- Runtime-generated data and credentials are ignored by Git
-- Main project docs are `README.md`, `CONTRIBUTING.md`, and `LICENSE`
+1. Agent/runtime owner: prompt strategy, orchestration loop, memory behavior.
+2. Desktop/tooling owner: screen automation, keyboard/mouse control, OCR, app actions.
+3. Platform/quality owner: infrastructure, tests, packaging, release stability.
 
-## Key Capabilities
+## Current Context
 
-- Persistent terminal agent session (REPL)
-- First-run onboarding (preferred name + system profile scan)
-- Tool-only execution enforcement for action requests
-- Structured OS tools for filesystem, process, desktop, Hyprland, wallpaper, and system info
-- Approval flow for system-critical actions
-- Multi-thread task chats (`/task new`, `/task switch`, `/task list`, `/task close`)
-- Soul system with auto-routing and manual switching
+Current implementation direction is single-mode power agent:
 
-## Repository Layout
+- No soul switching mode.
+- No dashboard mode.
+- No safe-mode or trust-mode toggle path.
+- Prompt-first execution with strict observe-plan-act-verify workflow.
+- Dynamic tool availability from real system capabilities.
+- Smart scan and memory context persistence for system understanding.
 
-- `hypr-claw-app/`: binary entrypoint, REPL, onboarding, soul/thread controls
-- `hypr-claw-runtime/`: agent loop, tool call flow, compaction integration
-- `hypr-claw-tools/`: structured tool schemas and OS capability wrappers
-- `hypr-claw-infra/`: audit logger, permission engine, lock/session infrastructure
-- `crates/`: modular workspace crates (core, memory, policy, providers, tasks, etc.)
-- `souls/`: soul profiles and prompt files
-- `docs/`: maintained technical documentation
+## Product Philosophy
 
-## Requirements
+- One powerful agent mode, not many personalities.
+- Fewer hardcoded branches, more model-driven decisions.
+- Fast context acquisition: summarize first, deep read only when needed.
+- Practical autonomy: strong tools with explicit approval on high-impact actions.
+- Keep architecture simple enough for a small team to ship quickly.
 
-Base:
+## End Product Goal
 
-- Rust 1.75+
-- Arch Linux (target environment)
-- Hyprland and `hyprctl` for workspace/window controls
+The end product is a reliable Linux OS copilot that can execute real desktop work end-to-end from natural prompts, including:
 
-Recommended tool dependencies for full desktop automation:
+- messaging and mail workflows
+- browser and research tasks
+- coding and file operations
+- system configuration and automation
+- routine productivity actions across applications
 
-- `swww` (wallpaper)
-- `wtype` and/or `ydotool` (typing, key/mouse input)
-- `wlrctl` (pointer control fallback)
-- `grim` and/or `hyprshot` (screenshots)
-- `tesseract` and `tesseract-data-eng` (OCR tools)
+## What Works Today
 
-Example install on Arch:
+- Terminal REPL agent runtime.
+- Onboarding plus system scan (standard and deep).
+- Capability registry and context memory persistence.
+- Queue and background task execution.
+- Model switching support.
+- Desktop automation tools including OCR, cursor movement, typing, key combos, window and app actions.
 
-```bash
-sudo pacman -S --needed swww wtype ydotool wlrctl grim hyprshot tesseract tesseract-data-eng
-```
+## Work Needed
 
-## Build and Run
+1. Improve reliability of long multi-step desktop workflows.
+2. Strengthen tool fallback logic for mixed environments.
+3. Expand permission model clarity for high-impact actions.
+4. Harden tests around GUI automation and recovery.
+5. Reduce remaining legacy dead code paths and keep interfaces minimal.
+6. Package and installation flow for user onboarding at scale.
 
-```bash
-cargo build --release
-./target/release/hypr-claw
-```
+## Architecture
 
-## First Run Flow
+Workspace layout:
 
-On first startup the agent will:
+- `hypr-claw-app/`: CLI entrypoint, onboarding, command loop.
+- `hypr-claw-runtime/`: agent loop, tool-call orchestration, execution control.
+- `hypr-claw-tools/`: concrete tool implementations and OS capability adapters.
+- `hypr-claw-infra/`: permissions, audit, sessions, locking infrastructure.
+- `crates/`: shared modules (`core`, `memory`, `providers`, `policy`, `tasks`, etc.).
 
-1. Ask for provider selection and credentials/config
-2. Ask what to call the user
-3. Ask permission for first-time system profile scan
-4. Show profile summary and allow correction
-5. Start persistent REPL session
+Execution flow:
 
-## Provider Notes
+1. Startup loads config, state, memory, and capability profile.
+2. Runtime exposes only tools supported by the current machine.
+3. User prompt enters strict action loop.
+4. Model selects tools, executes steps, verifies progress, and continues.
+5. State, history, and task outcomes persist to local data files.
 
-Agent-mode tool execution requires function-calling support.
+## How We Work
 
-Supported in agent mode:
+Team workflow:
 
-- NVIDIA
-- Google
-- Local OpenAI-compatible endpoint
+1. Keep one active architecture direction and remove old paths quickly.
+2. Prefer small, testable changes merged frequently.
+3. Document only in this `README.md`; avoid doc sprawl.
+4. Treat runtime behavior changes as product changes: update README in same PR.
+5. Run `cargo check` and relevant tests before merge.
 
-Configured but currently blocked for tool-calling agent mode:
-
-- Antigravity
-- Gemini CLI
-- Codex
-
-## REPL Commands
-
-Core commands:
-
-- `help`
-- `status`
-- `tasks`
-- `profile`
-- `scan`
-- `clear`
-- `exit`
-
-Soul commands:
-
-- `soul list`
-- `soul switch <id>`
-- `soul auto on|off`
-
-Task thread commands:
-
-- `/task new <title>`
-- `/task list`
-- `/task switch <id>`
-- `/task close <id>`
-
-## Security and Safety Model
-
-- Every tool has a JSON schema
-- Permission tiers are enforced per tool
-- Audit logging records tool execution
-- System-critical actions require explicit approval
-- Tool invocation is required when user intent implies action
-
-## Runtime Data
-
-Runtime files are intentionally excluded from version control and recreated at runtime:
-
-- `data/context/`
-- `data/sessions/`
-- `data/credentials/`
-- `data/tasks/`
-- `data/audit.log`
-
-## Development
+Recommended local commands:
 
 ```bash
 cargo check --workspace
 cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-See `docs/` for architecture and runtime behavior details.
+## Requirements
+
+- Rust 1.75+
+- Linux (Hyprland target first)
+- Tool dependencies for full desktop control:
+  - `wtype` or `ydotool`
+  - `wlrctl`
+  - `grim` or `hyprshot`
+  - `tesseract` and English language data
+  - `swww` (optional wallpaper control)
+
+## License
+
+This project is licensed under MIT. See `LICENSE`.

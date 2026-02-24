@@ -40,102 +40,25 @@ pub enum SkipReason {
 /// Classify file by extension and content
 pub fn classify_file(path: &Path, max_size: u64) -> Result<FileClass, std::io::Error> {
     let metadata = fs::metadata(path)?;
+    classify_file_with_size(path, metadata.len(), max_size)
+}
 
+/// Classify file using known size to avoid duplicate metadata calls.
+pub fn classify_file_with_size(
+    path: &Path,
+    size: u64,
+    max_size: u64,
+) -> Result<FileClass, std::io::Error> {
     // Skip large files
-    if metadata.len() > max_size {
+    if size > max_size {
         return Ok(FileClass::Binary {
-            reason: SkipReason::TooLarge(metadata.len()),
+            reason: SkipReason::TooLarge(size),
         });
     }
 
-    // Check if binary executable
-    if is_binary_executable(path)? {
-        return Ok(FileClass::Binary {
-            reason: SkipReason::BinaryExecutable,
-        });
-    }
-
-    // Extension-based classification
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        let ext_lower = ext.to_lowercase();
-        return Ok(match ext_lower.as_str() {
-            // Scripts
-            "sh" | "bash" | "zsh" | "fish" => FileClass::Script {
-                language: "shell".into(),
-            },
-            "py" => FileClass::Script {
-                language: "python".into(),
-            },
-            "rb" => FileClass::Script {
-                language: "ruby".into(),
-            },
-            "pl" => FileClass::Script {
-                language: "perl".into(),
-            },
-            "lua" => FileClass::Script {
-                language: "lua".into(),
-            },
-
-            // Source code
-            "rs" => FileClass::Source {
-                language: "rust".into(),
-            },
-            "c" | "h" => FileClass::Source {
-                language: "c".into(),
-            },
-            "cpp" | "cc" | "cxx" | "hpp" => FileClass::Source {
-                language: "cpp".into(),
-            },
-            "go" => FileClass::Source {
-                language: "go".into(),
-            },
-            "java" => FileClass::Source {
-                language: "java".into(),
-            },
-            "js" | "mjs" => FileClass::Source {
-                language: "javascript".into(),
-            },
-            "ts" => FileClass::Source {
-                language: "typescript".into(),
-            },
-
-            // Config files
-            "toml" => FileClass::Config {
-                subtype: ConfigType::Toml,
-            },
-            "yaml" | "yml" => FileClass::Config {
-                subtype: ConfigType::Yaml,
-            },
-            "json" => FileClass::Config {
-                subtype: ConfigType::Json,
-            },
-            "ini" | "cfg" | "conf" | "config" => FileClass::Config {
-                subtype: ConfigType::Ini,
-            },
-            "env" => FileClass::Config {
-                subtype: ConfigType::Environment,
-            },
-
-            // Documents
-            "txt" | "md" | "rst" | "adoc" => FileClass::Document,
-            "pdf" | "doc" | "docx" | "odt" | "rtf" => FileClass::Document,
-
-            // Media
-            "jpg" | "jpeg" | "png" | "gif" | "webp" | "svg" | "bmp" | "ico" => FileClass::Media,
-            "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv" | "wmv" => FileClass::Media,
-            "mp3" | "flac" | "wav" | "ogg" | "m4a" | "aac" | "wma" => FileClass::Media,
-
-            // Archives
-            "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" => FileClass::Binary {
-                reason: SkipReason::CompressedArchive,
-            },
-
-            // Data
-            "db" | "sqlite" | "sqlite3" => FileClass::Data,
-            "log" => FileClass::Data,
-
-            _ => FileClass::Other,
-        });
+    // Fast path: extension and dotfile name checks require no file reads.
+    if let Some(class) = classify_by_extension(path) {
+        return Ok(class);
     }
 
     // Check for dotfiles (configs without extension)
@@ -145,7 +68,97 @@ pub fn classify_file(path: &Path, max_size: u64) -> Result<FileClass, std::io::E
         }
     }
 
+    // Slow path: unknown files may still be native binaries.
+    if is_binary_executable(path)? {
+        return Ok(FileClass::Binary {
+            reason: SkipReason::BinaryExecutable,
+        });
+    }
+
     Ok(FileClass::Other)
+}
+
+fn classify_by_extension(path: &Path) -> Option<FileClass> {
+    let ext = path.extension().and_then(|e| e.to_str())?.to_lowercase();
+
+    Some(match ext.as_str() {
+        // Scripts
+        "sh" | "bash" | "zsh" | "fish" => FileClass::Script {
+            language: "shell".into(),
+        },
+        "py" => FileClass::Script {
+            language: "python".into(),
+        },
+        "rb" => FileClass::Script {
+            language: "ruby".into(),
+        },
+        "pl" => FileClass::Script {
+            language: "perl".into(),
+        },
+        "lua" => FileClass::Script {
+            language: "lua".into(),
+        },
+
+        // Source code
+        "rs" => FileClass::Source {
+            language: "rust".into(),
+        },
+        "c" | "h" => FileClass::Source {
+            language: "c".into(),
+        },
+        "cpp" | "cc" | "cxx" | "hpp" => FileClass::Source {
+            language: "cpp".into(),
+        },
+        "go" => FileClass::Source {
+            language: "go".into(),
+        },
+        "java" => FileClass::Source {
+            language: "java".into(),
+        },
+        "js" | "mjs" => FileClass::Source {
+            language: "javascript".into(),
+        },
+        "ts" => FileClass::Source {
+            language: "typescript".into(),
+        },
+
+        // Config files
+        "toml" => FileClass::Config {
+            subtype: ConfigType::Toml,
+        },
+        "yaml" | "yml" => FileClass::Config {
+            subtype: ConfigType::Yaml,
+        },
+        "json" => FileClass::Config {
+            subtype: ConfigType::Json,
+        },
+        "ini" | "cfg" | "conf" | "config" => FileClass::Config {
+            subtype: ConfigType::Ini,
+        },
+        "env" => FileClass::Config {
+            subtype: ConfigType::Environment,
+        },
+
+        // Documents
+        "txt" | "md" | "rst" | "adoc" => FileClass::Document,
+        "pdf" | "doc" | "docx" | "odt" | "rtf" => FileClass::Document,
+
+        // Media
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "svg" | "bmp" | "ico" => FileClass::Media,
+        "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv" | "wmv" => FileClass::Media,
+        "mp3" | "flac" | "wav" | "ogg" | "m4a" | "aac" | "wma" => FileClass::Media,
+
+        // Archives
+        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" => FileClass::Binary {
+            reason: SkipReason::CompressedArchive,
+        },
+
+        // Data
+        "db" | "sqlite" | "sqlite3" => FileClass::Data,
+        "log" => FileClass::Data,
+
+        _ => FileClass::Other,
+    })
 }
 
 fn classify_dotfile(name: &str) -> FileClass {

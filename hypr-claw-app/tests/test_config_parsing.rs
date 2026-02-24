@@ -105,7 +105,10 @@ function backup_home() {
         assert_eq!(result.data["aliases"]["ll"], "ls -la");
         assert_eq!(result.data["aliases"]["gs"], "git status");
         assert_eq!(result.data["exports"]["EDITOR"], "nvim");
-        assert!(result.data["functions"].as_array().unwrap().contains(&serde_json::json!("update_system")));
+        assert!(result.data["functions"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("update_system")));
         assert!(result.data["path_additions"].as_array().unwrap().len() > 0);
 
         fs::remove_dir_all(temp_dir).ok();

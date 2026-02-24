@@ -1,4 +1,4 @@
-use crate::types::*;
+use crate::{types::*, ContextCompactor};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::fs;
@@ -49,16 +49,21 @@ impl ContextManager {
     }
 
     pub async fn save(&self, context: &ContextData) -> Result<(), MemoryError> {
-        let path = self.context_path(&context.session_id);
+        let mut compacted_context = context.clone();
+        ContextCompactor::compact(&mut compacted_context);
+        let path = self.context_path(&compacted_context.session_id);
 
         // Atomic write: write to temp file, then rename
         let temp_path = path.with_extension("tmp");
-        let content = serde_json::to_string_pretty(context)?;
+        let content = serde_json::to_string_pretty(&compacted_context)?;
 
         fs::write(&temp_path, content).await?;
         fs::rename(&temp_path, &path).await?;
 
-        tracing::debug!("Saved context for session: {}", context.session_id);
+        tracing::debug!(
+            "Saved context for session: {}",
+            compacted_context.session_id
+        );
         Ok(())
     }
 

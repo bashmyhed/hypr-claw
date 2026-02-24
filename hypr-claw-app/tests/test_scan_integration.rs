@@ -64,10 +64,7 @@ mod scan_integration_tests {
         let policy = ScanPolicy::default();
         println!("\n📜 Default Policy:");
         println!("  Standard depth: {}", policy.standard_depth);
-        println!(
-            "  Max file size: {} MB",
-            policy.max_file_size / 1024 / 1024
-        );
+        println!("  Max file size: {} MB", policy.max_file_size / 1024 / 1024);
         println!("  Exclude patterns: {}", policy.exclude_patterns.len());
 
         assert!(!discovered.is_empty());
@@ -132,14 +129,17 @@ mod scan_integration_tests {
             "  Throughput: {:.2} MB/s",
             result.stats.throughput_mb_per_sec()
         );
-        println!(
-            "  Files/sec: {:.2}",
-            result.stats.files_per_sec()
-        );
+        println!("  Files/sec: {:.2}", result.stats.files_per_sec());
 
         // Verify results
-        assert!(result.stats.files_scanned >= 5, "Should scan at least 5 files");
-        assert!(result.stats.dirs_scanned >= 2, "Should scan at least 2 dirs");
+        assert!(
+            result.stats.files_scanned >= 5,
+            "Should scan at least 5 files"
+        );
+        assert!(
+            result.stats.dirs_scanned >= 2,
+            "Should scan at least 2 dirs"
+        );
 
         // Check file classifications
         let rust_files = result

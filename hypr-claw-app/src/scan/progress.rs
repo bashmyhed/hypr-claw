@@ -43,6 +43,14 @@ impl ScanProgress {
         self.bytes_processed.fetch_add(bytes, Ordering::Relaxed);
     }
 
+    pub fn files_scanned_count(&self) -> usize {
+        self.files_scanned.load(Ordering::Relaxed)
+    }
+
+    pub fn dirs_scanned_count(&self) -> usize {
+        self.dirs_scanned.load(Ordering::Relaxed)
+    }
+
     pub fn increment_skipped_large(&self) {
         self.skipped_large.fetch_add(1, Ordering::Relaxed);
     }
@@ -75,14 +83,10 @@ impl ScanProgress {
         let stats = self.get_stats();
         let mb = stats.bytes_processed / 1024 / 1024;
         let total_skipped = stats.skipped_large + stats.skipped_binary + stats.skipped_excluded;
-        
+
         print!(
             "\r🔎 Scanning: {} files, {} dirs, {} MB, {} skipped | {}s",
-            stats.files_scanned,
-            stats.dirs_scanned,
-            mb,
-            total_skipped,
-            stats.elapsed_secs
+            stats.files_scanned, stats.dirs_scanned, mb, total_skipped, stats.elapsed_secs
         );
         std::io::Write::flush(&mut std::io::stdout()).ok();
     }
@@ -196,7 +200,7 @@ mod tests {
     async fn test_scan_progress_errors() {
         let progress = ScanProgress::new();
         progress.add_error("test error".to_string()).await;
-        
+
         let errors = progress.errors.lock().await;
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0], "test error");

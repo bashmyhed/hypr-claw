@@ -1,9 +1,16 @@
 use serde_json::{json, Value};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Notify;
 
+use crate::scan::parsers::{
+    partition_results, GitParser, HyprlandParser, ParserRegistry, ShellParser,
+};
 use crate::scan::*;
-use crate::scan::parsers::{GitParser, HyprlandParser, ParserRegistry, ShellParser, partition_results};
+
+const MAX_CONFIG_PARSE_CANDIDATES: usize = 24;
+const PACKAGE_SAMPLE_LIMIT: usize = 80;
 
 /// Run integrated system scan with new scan engine
 pub async fn run_integrated_scan(
@@ -22,6 +29,13 @@ pub async fn run_integrated_scan(
 
         // Build policy interactively
         let policy = ScanPolicy::build_interactively(&discovered)?;
+        println!(
+            "⚡ Smart scan mode: depth={}, max_files={}, max_dirs={}, per_dir_entries={}",
+            policy.standard_depth,
+            policy.max_files_total,
+            policy.max_dirs_total,
+            policy.max_entries_per_dir
+        );
 
         // Calibrate resources
         let monitor = ResourceMonitor::auto_calibrate();
@@ -51,7 +65,7 @@ pub async fn run_integrated_scan(
         println!("  Size: {} MB", total_bytes / 1024 / 1024);
 
         // Build deep scan data with config parsing
-        let deep_data = build_deep_scan_data(&scan_results, &user_dirs, &policy);
+        let deep_data = build_deep_scan_data(&scan_results, &user_dirs).await;
         if let Some(obj) = profile.as_object_mut() {
             obj.insert("deep_scan".to_string(), deep_data);
         }
@@ -119,11 +133,7 @@ async fn collect_basic_system_profile(user_id: &str) -> Value {
     })
 }
 
-fn build_deep_scan_data(
-    scan_results: &[ScanResult],
-    user_dirs: &UserDirectories,
-    policy: &ScanPolicy,
-) -> Value {
+async fn build_deep_scan_data(scan_results: &[ScanResult], user_dirs: &UserDirectories) -> Value {
     let mut config_files = Vec::new();
     let mut script_files = Vec::new();
     let mut source_files = Vec::new();
@@ -164,14 +174,20 @@ fn build_deep_scan_data(
     }
 
     // Parse configs
-    println!("\n📝 Parsing config files...");
+    let parse_candidates = select_parse_candidates(&config_files);
+    println!(
+        "\n📝 Parsing prioritized configs: {} selected out of {} discovered...",
+        parse_candidates.len(),
+        config_files.len()
+    );
     let mut registry = ParserRegistry::new();
     registry.register(Box::new(HyprlandParser));
     registry.register(Box::new(ShellParser));
     registry.register(Box::new(GitParser));
 
-    let parse_results = registry.parse_all(&config_files);
+    let parse_results = registry.parse_all(&parse_candidates);
     let (parsed, failed) = partition_results(parse_results);
+    let packages = collect_package_inventory().await;
 
     // Show parse results
     if !parsed.is_empty() {
@@ -179,7 +195,7 @@ fn build_deep_scan_data(
     }
     if !failed.is_empty() {
         println!("  ⚠️  Failed: {} configs", failed.len());
-        for (path, error) in failed.iter().take(3) {
+        for (_, error) in failed.iter().take(3) {
             println!("    - {}", error.user_message());
         }
         if failed.len() > 3 {
@@ -206,13 +222,71 @@ fn build_deep_scan_data(
         "script_files": script_files.into_iter().take(50).collect::<Vec<_>>(),
         "source_files": source_files.into_iter().take(100).collect::<Vec<_>>(),
         "project_roots": project_dirs.into_iter().take(50).collect::<Vec<_>>(),
+        "packages": packages,
         "parsed_configs": parsed_configs,
         "parse_stats": {
-            "total": config_files.len(),
+            "total": parse_candidates.len(),
+            "discovered_total": config_files.len(),
             "parsed": parsed.len(),
             "failed": failed.len(),
         }
     })
+}
+
+fn select_parse_candidates(config_files: &[PathBuf]) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut ranked = config_files
+        .iter()
+        .filter_map(|path| {
+            let priority = parse_priority(path)?;
+            if !seen.insert(path.clone()) {
+                return None;
+            }
+            Some((priority, path.clone()))
+        })
+        .collect::<Vec<_>>();
+
+    ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    ranked
+        .into_iter()
+        .take(MAX_CONFIG_PARSE_CANDIDATES)
+        .map(|(_, path)| path)
+        .collect()
+}
+
+fn parse_priority(path: &Path) -> Option<u8> {
+    let name = path.file_name().and_then(|n| n.to_str())?;
+    let path_str = path.to_string_lossy();
+
+    // Highest-value desktop and shell configs.
+    if name == "hyprland.conf" && path_str.contains("/.config/hypr/") {
+        return Some(0);
+    }
+    if matches!(
+        name,
+        ".bashrc"
+            | ".bash_profile"
+            | ".bash_logout"
+            | ".zshrc"
+            | ".zshenv"
+            | ".zprofile"
+            | ".profile"
+            | ".gitconfig"
+            | "config.fish"
+    ) {
+        return Some(1);
+    }
+    if name == "config" && path_str.contains("/.config/git/") {
+        return Some(1);
+    }
+
+    // Additional Hyprland fragments.
+    if name.ends_with(".conf") && path_str.contains("/.config/hypr/") {
+        return Some(2);
+    }
+
+    // Skip parsing generic config files in onboarding deep scan.
+    None
 }
 
 fn parse_os_release_value(content: &str, key: &str) -> Option<String> {
@@ -222,6 +296,88 @@ fn parse_os_release_value(content: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+async fn collect_package_inventory() -> Value {
+    let mut sources = Vec::new();
+    let mut total_count = 0usize;
+    let mut pacman_explicit_count = 0usize;
+    let mut aur_count = 0usize;
+
+    if command_exists("pacman").await {
+        let (count, sample) = command_output_lines("pacman", &["-Qq"], PACKAGE_SAMPLE_LIMIT).await;
+        if count > 0 || !sample.is_empty() {
+            total_count += count;
+            pacman_explicit_count = count;
+            sources.push(json!({
+                "manager": "pacman",
+                "count": count,
+                "sample": sample,
+            }));
+        }
+
+        let (aur_pkg_count, aur_sample) =
+            command_output_lines("pacman", &["-Qm"], PACKAGE_SAMPLE_LIMIT / 2).await;
+        if aur_pkg_count > 0 || !aur_sample.is_empty() {
+            aur_count = aur_pkg_count;
+            sources.push(json!({
+                "manager": "aur",
+                "count": aur_pkg_count,
+                "sample": aur_sample,
+            }));
+        }
+    }
+
+    if command_exists("flatpak").await {
+        let (count, sample) = command_output_lines(
+            "flatpak",
+            &["list", "--app", "--columns=application"],
+            PACKAGE_SAMPLE_LIMIT / 2,
+        )
+        .await;
+        if count > 0 || !sample.is_empty() {
+            total_count += count;
+            sources.push(json!({
+                "manager": "flatpak",
+                "count": count,
+                "sample": sample,
+            }));
+        }
+    }
+
+    if command_exists("dpkg-query").await {
+        let (count, sample) = command_output_lines(
+            "dpkg-query",
+            &["-W", "-f=${binary:Package}\n"],
+            PACKAGE_SAMPLE_LIMIT,
+        )
+        .await;
+        if count > 0 || !sample.is_empty() {
+            total_count += count;
+            sources.push(json!({
+                "manager": "dpkg",
+                "count": count,
+                "sample": sample,
+            }));
+        }
+    } else if command_exists("rpm").await {
+        let (count, sample) = command_output_lines("rpm", &["-qa"], PACKAGE_SAMPLE_LIMIT).await;
+        if count > 0 || !sample.is_empty() {
+            total_count += count;
+            sources.push(json!({
+                "manager": "rpm",
+                "count": count,
+                "sample": sample,
+            }));
+        }
+    }
+
+    json!({
+        "total_count": total_count,
+        "pacman_explicit_count": pacman_explicit_count,
+        "aur_count": aur_count,
+        "sources": sources,
+    })
 }
 
 async fn command_output(command: &str, args: &[&str]) -> Option<String> {
@@ -235,6 +391,32 @@ async fn command_output(command: &str, args: &[&str]) -> Option<String> {
     } else {
         None
     }
+}
+
+async fn command_output_lines(
+    command: &str,
+    args: &[&str],
+    sample_limit: usize,
+) -> (usize, Vec<String>) {
+    let output = match tokio::process::Command::new(command)
+        .args(args)
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return (0, Vec::new()),
+    };
+
+    let rows = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|row| !row.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    let count = rows.len();
+    let sample = rows.into_iter().take(sample_limit).collect::<Vec<_>>();
+    (count, sample)
 }
 
 async fn command_exists(command: &str) -> bool {

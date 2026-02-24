@@ -143,10 +143,7 @@ fn parse_top_level_line(
     // Variables: $var = value
     if line.starts_with('$') {
         if let Some((var, value)) = line.split_once('=') {
-            variables.insert(
-                var.trim().to_string(),
-                value.trim().to_string(),
-            );
+            variables.insert(var.trim().to_string(), value.trim().to_string());
         }
         return;
     }
@@ -231,7 +228,8 @@ fn parse_keybind(line: &str) -> Value {
     // Example: bind = Super, Q, exec, kitty
     // Example: bindd = Super, V, Clipboard history, global, quickshell:overviewClipboardToggle
 
-    let bind_type = line.split(|c: char| c == '=' || c == ',')
+    let bind_type = line
+        .split(|c: char| c == '=' || c == ',')
         .next()
         .unwrap_or("bind")
         .trim();
@@ -361,7 +359,7 @@ general {
 }
 "#;
         let result = parse_hyprland_config(content, Path::new("/test")).unwrap();
-        
+
         assert!(result["keybinds"].is_array());
         assert!(result["exec_once"].is_array());
         assert!(result["monitors"].is_array());
