@@ -86,6 +86,10 @@ where
                 _ => {}
             }
 
+            // Show thinking indicator
+            eprint!("🤔 Thinking...");
+            std::io::Write::flush(&mut std::io::stderr()).ok();
+
             match self.agent_loop.run(
                 &self.session_key,
                 &self.agent_id,
@@ -93,9 +97,11 @@ where
                 input,
             ).await {
                 Ok(response) => {
+                    eprint!("\r\x1B[K"); // Clear the thinking line
                     println!("\n{}\n", response);
                 }
                 Err(e) => {
+                    eprint!("\r\x1B[K"); // Clear the thinking line
                     eprintln!("❌ Error: {}\n", e);
                 }
             }

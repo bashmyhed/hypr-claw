@@ -29,7 +29,7 @@ pub async fn run(agent: &str, user: &str, message: &str) -> Result<()> {
         &config.sessions_dir,
     )?);
     let lock_manager = Arc::new(hypr_claw::infra::lock_manager::LockManager::new(
-        Duration::from_secs(30),
+        Duration::from_secs(300),
     ));
     let permission_engine = Arc::new(hypr_claw::infra::permission_engine::PermissionEngine::new());
     let audit_logger = Arc::new(hypr_claw::infra::audit_logger::AuditLogger::new(

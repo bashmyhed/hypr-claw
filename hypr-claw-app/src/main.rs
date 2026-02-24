@@ -8,6 +8,7 @@ use tokio::process::Command;
 
 pub mod bootstrap;
 pub mod config;
+pub mod scan;
 pub mod tui;
 
 use config::{Config, LLMProvider};
@@ -165,7 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     run_first_run_onboarding(&user_id, &mut context, &mut agent_state).await?;
     if profile_needs_capability_refresh(&agent_state.onboarding.system_profile) {
-        agent_state.onboarding.system_profile = collect_system_profile(&user_id).await;
+        agent_state.onboarding.system_profile = scan::run_integrated_scan(&user_id, false).await?;
         agent_state.onboarding.last_scan_at = Some(chrono::Utc::now().timestamp());
     }
     let (mut capability_registry, registry_loaded) = match load_capability_registry(&user_id) {
@@ -206,7 +207,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let lock_manager = Arc::new(hypr_claw::infra::lock_manager::LockManager::new(
-        Duration::from_secs(30),
+        Duration::from_secs(300),
     ));
     let permission_engine = Arc::new(hypr_claw::infra::permission_engine::PermissionEngine::new());
 
@@ -972,18 +973,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "scan" | "/scan" => {
                         if prompt_yes_no("Run a new system scan now? [Y/n] ", true)? {
                             let deep_scan = prompt_yes_no(
-                                "Deep scan (home/.config/packages/hyprland)? [Y/n] ",
+                                "Deep scan (home directory with user consent)? [Y/n] ",
                                 true,
                             )?;
-                            println!(
-                                "🔎 Running {} scan...",
-                                if deep_scan { "deep" } else { "standard" }
-                            );
-                            let mut scanned_profile = if deep_scan {
-                                collect_deep_system_profile(&user_id).await
-                            } else {
-                                collect_system_profile(&user_id).await
-                            };
+                            
+                            let mut scanned_profile = scan::run_integrated_scan(&user_id, deep_scan).await?;
 
                             print_system_profile_summary(&scanned_profile);
                             let mut scanned_registry = build_capability_registry(&scanned_profile);
@@ -4511,18 +4505,11 @@ async fn run_first_run_onboarding(
 
     if prompt_yes_no("Allow first-time system study scan? [Y/n] ", true)? {
         let deep_scan = prompt_yes_no(
-            "Run deep system learning scan (home/.config/packages/hyprland)? [Y/n] ",
+            "Run deep system learning scan (home directory with consent)? [Y/n] ",
             true,
         )?;
-        println!(
-            "🔎 Running {} scan...",
-            if deep_scan { "deep" } else { "standard" }
-        );
-        state.onboarding.system_profile = if deep_scan {
-            collect_deep_system_profile(user_id).await
-        } else {
-            collect_system_profile(user_id).await
-        };
+        
+        state.onboarding.system_profile = scan::run_integrated_scan(user_id, deep_scan).await?;
         state.onboarding.deep_scan_completed = deep_scan;
         state.onboarding.last_scan_at = Some(chrono::Utc::now().timestamp());
         print_system_profile_summary(&state.onboarding.system_profile);

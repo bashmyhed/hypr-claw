@@ -64,6 +64,6 @@ mod tests {
         let _standard = LLMClientType::Standard(LLMClient::new("http://test".to_string(), 3));
 
         // Can't easily test Codex without OAuth, but verify it compiles
-        assert!(true);
+        // Test passes if we reach here
     }
 }

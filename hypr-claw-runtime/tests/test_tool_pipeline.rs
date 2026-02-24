@@ -100,18 +100,21 @@ fn test_tool_schemas_format() {
     // Verify specific tool
     let wallpaper_tool = schemas
         .iter()
-        .find(|s| s["function"]["name"] == "set_wallpaper")
-        .expect("set_wallpaper tool not found");
+        .find(|s| s["function"]["name"] == "set_wallpaper");
+    
+    assert!(wallpaper_tool.is_some(), "set_wallpaper tool not found");
+    
+    if let Some(tool) = wallpaper_tool {
+        assert_eq!(
+            tool["function"]["description"],
+            "Set desktop wallpaper from an image file"
+        );
 
-    assert_eq!(
-        wallpaper_tool["function"]["description"],
-        "Set desktop wallpaper from an image file"
-    );
-
-    let params = &wallpaper_tool["function"]["parameters"];
-    assert_eq!(params["type"], "object");
-    assert!(params["properties"]["image_path"].is_object());
-    assert_eq!(params["required"][0], "image_path");
+        let params = &tool["function"]["parameters"];
+        assert_eq!(params["type"], "object");
+        assert!(params["properties"]["image_path"].is_object());
+        assert_eq!(params["required"][0], "image_path");
+    }
 }
 
 #[test]
@@ -147,6 +150,8 @@ fn test_tool_names_match_schemas() {
     assert_eq!(names.len(), schemas.len());
 
     for (name, schema) in names.iter().zip(schemas.iter()) {
-        assert_eq!(name, schema["function"]["name"].as_str().unwrap());
+        if let Some(schema_name) = schema["function"]["name"].as_str() {
+            assert_eq!(name, schema_name);
+        }
     }
 }

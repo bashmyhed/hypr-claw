@@ -168,7 +168,7 @@ mod tests {
         let result = adapter.convert_messages("You are helpful", &runtime_messages);
         assert!(result.is_ok());
 
-        let provider_messages = result.unwrap();
+        let provider_messages = result.expect("Should have messages");
         assert_eq!(provider_messages.len(), 2); // No system message, prepended to user
         assert_eq!(provider_messages[0].role, "user");
         assert!(provider_messages[0].content.contains("You are helpful"));
@@ -191,11 +191,10 @@ mod tests {
         let result = adapter.convert_response(provider_response);
         assert!(result.is_ok());
 
-        match result.unwrap() {
-            LLMResponse::Final { content, .. } => {
-                assert_eq!(content, "Test response");
-            }
-            _ => panic!("Expected Final response"),
+        if let Ok(LLMResponse::Final { content, .. }) = result {
+            assert_eq!(content, "Test response");
+        } else {
+            panic!("Expected Final response");
         }
     }
 
@@ -220,11 +219,10 @@ mod tests {
         assert!(result.is_ok());
 
         // Codex adapter always returns Final, never ToolCall
-        match result.unwrap() {
-            LLMResponse::Final { content, .. } => {
-                assert_eq!(content, ""); // No content provided
-            }
-            _ => panic!("Expected Final response from Codex adapter"),
+        if let Ok(LLMResponse::Final { content, .. }) = result {
+            assert_eq!(content, ""); // No content provided
+        } else {
+            panic!("Expected Final response from Codex adapter");
         }
     }
 }
