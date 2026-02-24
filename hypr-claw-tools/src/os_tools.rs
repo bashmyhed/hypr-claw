@@ -290,6 +290,10 @@ pub struct DesktopOcrScreenTool;
 pub struct DesktopFindTextTool;
 pub struct DesktopClickTextTool;
 pub struct DesktopWaitForTextTool;
+pub struct DesktopCursorPositionTool;
+pub struct DesktopMouseMoveAndVerifyTool;
+pub struct DesktopClickAtAndVerifyTool;
+pub struct DesktopReadScreenStateTool;
 
 #[async_trait]
 impl Tool for ProcSpawnTool {
@@ -1077,6 +1081,177 @@ impl Tool for DesktopWaitForTextTool {
         Ok(ToolResult {
             success: true,
             output: Some(json!({"query": query, "match": found})),
+            error: None,
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for DesktopCursorPositionTool {
+    fn name(&self) -> &'static str {
+        "desktop.cursor_position"
+    }
+    fn description(&self) -> &'static str {
+        "Get current cursor position using compositor metadata"
+    }
+    fn permission_tier(&self) -> PermissionTier {
+        PermissionTier::Read
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        })
+    }
+    async fn execute(
+        &self,
+        _ctx: ExecutionContext,
+        _input: Value,
+    ) -> Result<ToolResult, ToolError> {
+        let (x, y) = desktop::cursor_position()
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        Ok(ToolResult {
+            success: true,
+            output: Some(json!({"x": x, "y": y})),
+            error: None,
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for DesktopMouseMoveAndVerifyTool {
+    fn name(&self) -> &'static str {
+        "desktop.mouse_move_and_verify"
+    }
+    fn description(&self) -> &'static str {
+        "Move cursor to coordinate and verify final cursor position"
+    }
+    fn permission_tier(&self) -> PermissionTier {
+        PermissionTier::Execute
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "x": {"type": "number"},
+                "y": {"type": "number"},
+                "tolerance": {"type": "number"},
+                "timeout_ms": {"type": "number"}
+            },
+            "required": ["x", "y"],
+            "additionalProperties": false
+        })
+    }
+    async fn execute(&self, _ctx: ExecutionContext, input: Value) -> Result<ToolResult, ToolError> {
+        let x = required_u32(&input, "x")? as i32;
+        let y = required_u32(&input, "y")? as i32;
+        let tolerance = input["tolerance"].as_i64().unwrap_or(8) as i32;
+        let timeout_ms = input["timeout_ms"].as_u64().unwrap_or(900);
+        let (vx, vy) = desktop::mouse_move_and_verify(x, y, tolerance, timeout_ms)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        Ok(ToolResult {
+            success: true,
+            output: Some(json!({"target": {"x": x, "y": y}, "verified": {"x": vx, "y": vy}})),
+            error: None,
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for DesktopClickAtAndVerifyTool {
+    fn name(&self) -> &'static str {
+        "desktop.click_at_and_verify"
+    }
+    fn description(&self) -> &'static str {
+        "Move cursor, click at coordinate, and return pre/post cursor verification"
+    }
+    fn permission_tier(&self) -> PermissionTier {
+        PermissionTier::Execute
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "x": {"type": "number"},
+                "y": {"type": "number"},
+                "button": {"type": "string", "enum": ["left", "middle", "right"]},
+                "tolerance": {"type": "number"},
+                "timeout_ms": {"type": "number"}
+            },
+            "required": ["x", "y"],
+            "additionalProperties": false
+        })
+    }
+    async fn execute(&self, _ctx: ExecutionContext, input: Value) -> Result<ToolResult, ToolError> {
+        let x = required_u32(&input, "x")? as i32;
+        let y = required_u32(&input, "y")? as i32;
+        let button = input["button"].as_str().unwrap_or("left");
+        let tolerance = input["tolerance"].as_i64().unwrap_or(8) as i32;
+        let timeout_ms = input["timeout_ms"].as_u64().unwrap_or(900);
+        let result = desktop::click_at_and_verify(x, y, button, tolerance, timeout_ms)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        Ok(ToolResult {
+            success: true,
+            output: Some(result),
+            error: None,
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for DesktopReadScreenStateTool {
+    fn name(&self) -> &'static str {
+        "desktop.read_screen_state"
+    }
+    fn description(&self) -> &'static str {
+        "Read screen state (windows/cursor/screenshot and optional OCR) in one call"
+    }
+    fn permission_tier(&self) -> PermissionTier {
+        PermissionTier::Read
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "include_ocr": {"type": "boolean"},
+                "include_windows": {"type": "boolean"},
+                "include_cursor": {"type": "boolean"},
+                "include_screenshot": {"type": "boolean"},
+                "lang": {"type": "string"},
+                "window_limit": {"type": "number"},
+                "max_ocr_matches": {"type": "number"}
+            },
+            "additionalProperties": false
+        })
+    }
+    async fn execute(&self, _ctx: ExecutionContext, input: Value) -> Result<ToolResult, ToolError> {
+        let include_ocr = input["include_ocr"].as_bool().unwrap_or(true);
+        let include_windows = input["include_windows"].as_bool().unwrap_or(true);
+        let include_cursor = input["include_cursor"].as_bool().unwrap_or(true);
+        let include_screenshot = input["include_screenshot"].as_bool().unwrap_or(true);
+        let lang = input["lang"].as_str();
+        let window_limit = input["window_limit"].as_u64().unwrap_or(30) as usize;
+        let max_ocr_matches = input["max_ocr_matches"].as_u64().unwrap_or(240) as usize;
+
+        let state = desktop::read_screen_state(
+            include_ocr,
+            include_windows,
+            include_cursor,
+            include_screenshot,
+            lang,
+            window_limit,
+            max_ocr_matches,
+        )
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        Ok(ToolResult {
+            success: true,
+            output: Some(state),
             error: None,
         })
     }

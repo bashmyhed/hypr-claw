@@ -225,6 +225,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     registry.register(Arc::new(hypr_claw_tools::os_tools::DesktopFindTextTool));
     registry.register(Arc::new(hypr_claw_tools::os_tools::DesktopClickTextTool));
     registry.register(Arc::new(hypr_claw_tools::os_tools::DesktopWaitForTextTool));
+    registry.register(Arc::new(
+        hypr_claw_tools::os_tools::DesktopCursorPositionTool,
+    ));
+    registry.register(Arc::new(
+        hypr_claw_tools::os_tools::DesktopMouseMoveAndVerifyTool,
+    ));
+    registry.register(Arc::new(
+        hypr_claw_tools::os_tools::DesktopClickAtAndVerifyTool,
+    ));
+    registry.register(Arc::new(
+        hypr_claw_tools::os_tools::DesktopReadScreenStateTool,
+    ));
     registry.register(Arc::new(hypr_claw_tools::os_tools::WallpaperSetTool));
     registry.register(Arc::new(hypr_claw_tools::os_tools::SystemShutdownTool));
     registry.register(Arc::new(hypr_claw_tools::os_tools::SystemRebootTool));
@@ -353,6 +365,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let mut auto_queued_task: Option<SupervisedTask> = None;
     let mut queue_block_notice: Option<String> = None;
+    let mut transcript_view_mode = true;
     let mut background_task_index: HashMap<String, TaskStateDigest> = HashMap::new();
     let mut supervisor_background_map: HashMap<String, String> = HashMap::new();
     for task in &agent_state.supervisor.tasks {
@@ -706,6 +719,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         print_help();
                         continue;
                     }
+                    "view" | "/view" => {
+                        println!(
+                            "View mode: {}",
+                            if transcript_view_mode {
+                                "transcript"
+                            } else {
+                                "compact"
+                            }
+                        );
+                        println!("Use: view transcript | view compact");
+                        continue;
+                    }
                     "status" | "/status" => {
                         let task_list = task_manager.list_tasks().await;
                         print_status_panel(
@@ -826,6 +851,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     _ => {}
                 }
+                }
+
+                if !input_from_queue {
+                    if let Some(mode) = input
+                        .strip_prefix("view ")
+                        .or_else(|| input.strip_prefix("/view "))
+                        .map(str::trim)
+                    {
+                        match mode {
+                            "transcript" | "live" | "on" => {
+                                transcript_view_mode = true;
+                                println!("✅ View mode set to transcript");
+                            }
+                            "compact" | "off" => {
+                                transcript_view_mode = false;
+                                println!("✅ View mode set to compact");
+                            }
+                            _ => {
+                                println!("Use: view transcript | view compact");
+                            }
+                        }
+                        continue;
+                    }
                 }
 
                 if !input_from_queue {
@@ -1754,11 +1802,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 agent_state.reliability.last_break_reason.clear();
                 agent_state.reliability.updated_at = Some(chrono::Utc::now().timestamp());
 
+                println!();
                 println!(
-                    "plan> analyze -> execute tools -> report  [mode=power class={} iter={} timeout={}s]",
+                    "{}",
+                    ui_accent("──────────────────────────── Run ────────────────────────────")
+                );
+                println!(
+                    "prompt   : {}",
+                    truncate_for_table(&effective_input.replace('\n', " "), 120)
+                );
+                println!(
+                    "mode     : power  class={}  iter={}  timeout={}s  model={}",
                     task_class.as_str(),
                     agent_loop.max_iterations(),
-                    watchdog_timeout.as_secs()
+                    watchdog_timeout.as_secs(),
+                    short_model_name(&config.model)
+                );
+                println!("thinking : observe -> pick best tool -> verify -> continue");
+                println!(
+                    "tools    : {} active{}",
+                    active_allowed_tools.len(),
+                    if use_focused {
+                        format!(" (focused to {})", focused_tools.len())
+                    } else {
+                        String::new()
+                    }
                 );
 
                 let turn_system_prompt = augment_system_prompt_for_turn(
@@ -1768,6 +1836,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &active_allowed_tools,
                     &agent_state.autonomy_mode,
                 );
+                let run_action_start = action_feed_len(&action_feed);
+                let mut recovery_notes: Vec<String> = Vec::new();
 
                 let mut run_result = run_with_interrupt_and_timeout(
                     &agent_loop,
@@ -1805,10 +1875,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             agent_state.reliability.last_stage =
                                 "recovery_provider_rate_limit".to_string();
                             agent_state.reliability.fallback_attempts = fallback_attempts;
-                            println!(
-                                "⏳ Provider rate-limited. Retrying in {}s...",
-                                wait_secs
+                            let note = format!(
+                                "[recovery {}/{}] provider_rate_limit -> retry in {}s",
+                                fallback_attempts, MAX_RECOVERY_ATTEMPTS, wait_secs
                             );
+                            recovery_notes.push(note.clone());
+                            println!("{note}");
                             tokio::time::sleep(Duration::from_secs(wait_secs)).await;
                             run_result = run_with_interrupt_and_timeout(
                                 &agent_loop,
@@ -1852,6 +1924,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     agent_state.reliability.fallback_attempts = fallback_attempts;
                     let prompt_first_mode =
                         matches!(agent_state.autonomy_mode, AutonomyMode::PromptFirst);
+                    let note = format!(
+                        "[recovery {}/{}] error={}",
+                        fallback_attempts,
+                        MAX_RECOVERY_ATTEMPTS,
+                        truncate_for_table(&err_msg, 110)
+                    );
+                    recovery_notes.push(note.clone());
+                    println!("{note}");
 
                     if is_tool_enforcement_error {
                         agent_state.reliability.last_stage = "recovery_tool_enforcement".to_string();
@@ -1978,7 +2058,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         context.active_tasks = to_context_tasks(task_manager.list_tasks().await);
                         persist_agent_os_state(&mut context, &agent_state);
                         context_manager.save(&context).await?;
-                        println!("\n{}\n", response);
+                        if transcript_view_mode {
+                            let tool_rows = action_feed_since(&action_feed, run_action_start, 20);
+                            let mut result_rows = vec![format!("ok: completed in {}ms", run_elapsed_ms)];
+                            result_rows.extend(text_preview_lines(&response, 6, 112));
+                            print_transcript_panes(
+                                &effective_input,
+                                &config.model,
+                                task_class.as_str(),
+                                run_elapsed_ms,
+                                &tool_rows,
+                                &recovery_notes,
+                                &result_rows,
+                            );
+                        }
+                        println!(
+                            "{}",
+                            ui_accent("────────────────────────── Response ──────────────────────────")
+                        );
+                        println!("{}\n", response);
                     }
                     Err(e) => {
                         let error_msg = e.to_string();
@@ -2026,6 +2124,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         mark_plan_failed(&mut context, &error_msg);
                         persist_agent_os_state(&mut context, &agent_state);
                         context_manager.save(&context).await?;
+                        if transcript_view_mode {
+                            let tool_rows = action_feed_since(&action_feed, run_action_start, 20);
+                            let mut result_rows = vec![format!(
+                                "failed: {} in {}ms",
+                                stop_code, run_elapsed_ms
+                            )];
+                            result_rows.extend(text_preview_lines(&error_msg, 4, 112));
+                            if !hint.is_empty() {
+                                result_rows.push(format!("next: {}", &hint));
+                            }
+                            print_transcript_panes(
+                                &effective_input,
+                                &config.model,
+                                task_class.as_str(),
+                                run_elapsed_ms,
+                                &tool_rows,
+                                &recovery_notes,
+                                &result_rows,
+                            );
+                        }
                         if error_msg.contains("Interrupted by user") {
                             println!("⏹ Request interrupted by user.\n");
                         } else {
@@ -2092,7 +2210,7 @@ fn initialize_directories() -> Result<(), Box<dyn std::error::Error>> {
     if !std::path::Path::new(default_agent_config).exists() {
         std::fs::write(
             default_agent_config,
-            "id: default\nsoul: default_soul.md\ntools:\n  - echo\n  - fs.read\n  - fs.write\n  - fs.list\n  - fs.create_dir\n  - fs.move\n  - fs.copy\n  - fs.delete\n  - hypr.workspace.switch\n  - hypr.workspace.move_window\n  - hypr.window.focus\n  - hypr.window.close\n  - hypr.window.move\n  - hypr.exec\n  - proc.spawn\n  - proc.kill\n  - proc.list\n  - desktop.open_url\n  - desktop.launch_app\n  - desktop.launch_app_and_wait_text\n  - desktop.search_web\n  - desktop.open_gmail\n  - desktop.type_text\n  - desktop.key_press\n  - desktop.key_combo\n  - desktop.mouse_click\n  - desktop.capture_screen\n  - desktop.active_window\n  - desktop.list_windows\n  - desktop.mouse_move\n  - desktop.click_at\n  - desktop.ocr_screen\n  - desktop.find_text\n  - desktop.click_text\n  - desktop.wait_for_text\n  - wallpaper.set\n  - system.memory\n  - system.battery\n"
+            "id: default\nsoul: default_soul.md\ntools:\n  - echo\n  - fs.read\n  - fs.write\n  - fs.list\n  - fs.create_dir\n  - fs.move\n  - fs.copy\n  - fs.delete\n  - hypr.workspace.switch\n  - hypr.workspace.move_window\n  - hypr.window.focus\n  - hypr.window.close\n  - hypr.window.move\n  - hypr.exec\n  - proc.spawn\n  - proc.kill\n  - proc.list\n  - desktop.open_url\n  - desktop.launch_app\n  - desktop.launch_app_and_wait_text\n  - desktop.search_web\n  - desktop.open_gmail\n  - desktop.type_text\n  - desktop.key_press\n  - desktop.key_combo\n  - desktop.mouse_click\n  - desktop.capture_screen\n  - desktop.active_window\n  - desktop.list_windows\n  - desktop.cursor_position\n  - desktop.read_screen_state\n  - desktop.mouse_move\n  - desktop.mouse_move_and_verify\n  - desktop.click_at\n  - desktop.click_at_and_verify\n  - desktop.ocr_screen\n  - desktop.find_text\n  - desktop.click_text\n  - desktop.wait_for_text\n  - wallpaper.set\n  - system.memory\n  - system.battery\n"
         )?;
     }
 
@@ -2113,7 +2231,7 @@ struct SoulProfile {
 
 fn power_agent_profile() -> SoulProfile {
     SoulProfile {
-        system_prompt: "You are a powerful local Linux + Hyprland OS assistant.\nFollow strict workflow: observe -> plan -> execute tool -> verify -> continue until done.\nFor GUI tasks, operate like a human using screen + cursor + keyboard tools.\nChoose tools dynamically from allowed_tools_now.\nAsk for permission before destructive/high-impact actions.\nAvoid hardcoded assumptions and adapt from live system/context.".to_string(),
+        system_prompt: "You are a powerful local Linux + Hyprland OS assistant.\nFollow strict workflow: observe -> plan -> execute tool -> verify -> continue until done.\nFor GUI tasks, observe with desktop.read_screen_state/active_window/list_windows/cursor_position first, then act with cursor + keyboard tools.\nChoose tools dynamically from allowed_tools_now.\nAsk for permission before destructive/high-impact actions.\nAvoid hardcoded assumptions and adapt from live system/context.".to_string(),
         max_iterations: 36,
     }
 }
@@ -2206,7 +2324,14 @@ fn derive_runtime_allowed_tools(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let has_input_backend = has_array_entries("/capabilities/input_backends");
+    let input_backends =
+        read_string_array_from_value(capability_registry.pointer("/capabilities/input_backends"));
+    let has_keyboard_backend = input_backends
+        .iter()
+        .any(|b| matches!(b.as_str(), "wtype" | "ydotool"));
+    let has_pointer_backend = input_backends
+        .iter()
+        .any(|b| matches!(b.as_str(), "ydotool" | "wlrctl"));
     let has_screenshot_backend = has_array_entries("/capabilities/screenshot_backends");
     let has_wallpaper_backend = has_array_entries("/capabilities/wallpaper_backends");
 
@@ -2226,13 +2351,18 @@ fn derive_runtime_allowed_tools(
             "desktop.wait_for_text" | "desktop.launch_app_and_wait_text" => {
                 has_screenshot_backend && ocr_available
             }
-            "desktop.type_text"
-            | "desktop.key_press"
-            | "desktop.key_combo"
-            | "desktop.mouse_click"
-            | "desktop.mouse_move"
-            | "desktop.click_at" => has_input_backend,
-            "desktop.click_text" => has_input_backend && has_screenshot_backend && ocr_available,
+            "desktop.cursor_position" => hyprland_available,
+            "desktop.mouse_move_and_verify" | "desktop.click_at_and_verify" => {
+                has_pointer_backend && hyprland_available
+            }
+            "desktop.read_screen_state" => hyprland_available || has_screenshot_backend,
+            "desktop.type_text" | "desktop.key_press" | "desktop.key_combo" => {
+                has_keyboard_backend
+            }
+            "desktop.mouse_click" | "desktop.mouse_move" | "desktop.click_at" => {
+                has_pointer_backend
+            }
+            "desktop.click_text" => has_pointer_backend && has_screenshot_backend && ocr_available,
             _ => true,
         })
         .collect()
@@ -2595,7 +2725,96 @@ fn print_help() {
     println!("  {}", ui_accent("System"));
     println!("    profile               Show learned system profile");
     println!("    scan                  Re-run system scan");
+    println!("    view                  Show current CLI view mode");
+    println!("    view transcript       Enable transcript panes");
+    println!("    view compact          Disable transcript panes");
     println!();
+}
+
+fn action_feed_len(feed: &Arc<Mutex<Vec<String>>>) -> usize {
+    feed.lock().ok().map(|f| f.len()).unwrap_or(0)
+}
+
+fn action_feed_since(feed: &Arc<Mutex<Vec<String>>>, start: usize, max_rows: usize) -> Vec<String> {
+    let rows = feed.lock().ok().map(|f| f.clone()).unwrap_or_default();
+    if start >= rows.len() {
+        return Vec::new();
+    }
+    let mut slice = rows[start..].to_vec();
+    if max_rows > 0 && slice.len() > max_rows {
+        let keep_from = slice.len().saturating_sub(max_rows);
+        slice = slice[keep_from..].to_vec();
+    }
+    slice
+}
+
+fn text_preview_lines(text: &str, max_lines: usize, max_width: usize) -> Vec<String> {
+    if text.trim().is_empty() {
+        return vec!["(empty)".to_string()];
+    }
+    let mut lines = Vec::new();
+    for line in text.lines().take(max_lines) {
+        lines.push(truncate_for_table(line.trim(), max_width));
+    }
+    if text.lines().count() > max_lines {
+        lines.push(format!("... (truncated, {}+ lines)", max_lines));
+    }
+    if lines.is_empty() {
+        lines.push(truncate_for_table(text.trim(), max_width));
+    }
+    lines
+}
+
+fn print_transcript_panes(
+    prompt: &str,
+    model: &str,
+    class_label: &str,
+    run_elapsed_ms: u64,
+    tool_rows: &[String],
+    recovery_rows: &[String],
+    result_rows: &[String],
+) {
+    println!(
+        "{}",
+        ui_accent("─────────────────────── Live Transcript ───────────────────────")
+    );
+    println!(
+        "{} {} | {} {} | {} {}ms",
+        ui_dim("model:"),
+        ui_info(&short_model_name(model)),
+        ui_dim("class:"),
+        ui_info(class_label),
+        ui_dim("elapsed:"),
+        run_elapsed_ms
+    );
+    println!("{}", ui_title("Prompt"));
+    for row in text_preview_lines(prompt, 4, 118) {
+        println!("  {}", row);
+    }
+    println!("{}", ui_title("Tools"));
+    if tool_rows.is_empty() {
+        println!("  {}", ui_dim("(no tool calls)"));
+    } else {
+        for row in tool_rows {
+            println!("  {}", truncate_for_table(row, 118));
+        }
+    }
+    println!("{}", ui_title("Recovery"));
+    if recovery_rows.is_empty() {
+        println!("  {}", ui_dim("(none)"));
+    } else {
+        for row in recovery_rows {
+            println!("  {}", truncate_for_table(row, 118));
+        }
+    }
+    println!("{}", ui_title("Result"));
+    for row in result_rows {
+        println!("  {}", truncate_for_table(row, 118));
+    }
+    println!(
+        "{}",
+        ui_accent("────────────────────────────────────────────────────────────────")
+    );
 }
 
 fn print_tasks_panel(task_list: &[hypr_claw_tasks::TaskInfo]) {
@@ -4956,7 +5175,7 @@ fn augment_system_prompt_for_turn(
     let mut tools = allowed_tools.iter().cloned().collect::<Vec<String>>();
     tools.sort();
     let policy_block = if strict_workflow_enabled() {
-        "Strict workflow:\n1) Observe first (screen/window/state) before acting on GUI tasks.\n2) Plan short and execute using tools, not explanation-only text.\n3) Prefer one decisive tool call at a time with valid JSON input.\n4) After each action, verify with tools (screen/file/process checks) and continue until done.\n5) Ask for user permission before high-impact or destructive actions.\n6) Stop only when truly blocked and report exact blocker + next best option."
+        "Strict workflow:\n1) Observe first using desktop.read_screen_state/active_window/list_windows/cursor_position before GUI actions.\n2) Plan short and execute using tools, not explanation-only text.\n3) Prefer one decisive tool call at a time with valid JSON input.\n4) After each action, verify with tools (cursor/window/screen/file/process checks) and continue until done.\n5) Ask for user permission before high-impact or destructive actions.\n6) Stop only when truly blocked and report exact blocker + next best option."
     } else {
         match autonomy_mode {
             AutonomyMode::PromptFirst => {
@@ -5060,6 +5279,8 @@ fn focused_tools_for_input(input: &str, allowed: &HashSet<String>) -> HashSet<St
         || lower.contains("screenshot")
         || lower.contains("screen")
     {
+        add(&mut preferred, "desktop.read_screen_state", allowed);
+        add(&mut preferred, "desktop.cursor_position", allowed);
         add(&mut preferred, "desktop.type_text", allowed);
         add(&mut preferred, "desktop.key_press", allowed);
         add(&mut preferred, "desktop.key_combo", allowed);
@@ -5068,7 +5289,9 @@ fn focused_tools_for_input(input: &str, allowed: &HashSet<String>) -> HashSet<St
         add(&mut preferred, "desktop.active_window", allowed);
         add(&mut preferred, "desktop.list_windows", allowed);
         add(&mut preferred, "desktop.mouse_move", allowed);
+        add(&mut preferred, "desktop.mouse_move_and_verify", allowed);
         add(&mut preferred, "desktop.click_at", allowed);
+        add(&mut preferred, "desktop.click_at_and_verify", allowed);
         add(&mut preferred, "desktop.ocr_screen", allowed);
         add(&mut preferred, "desktop.find_text", allowed);
         add(&mut preferred, "desktop.click_text", allowed);
@@ -5151,9 +5374,13 @@ fn fallback_playbook_for_input(input: &str, allowed: &HashSet<String>) -> String
         rows.push((
             "screen-automation",
             vec![
+                "desktop.read_screen_state",
+                "desktop.cursor_position",
                 "desktop.capture_screen",
                 "desktop.ocr_screen",
                 "desktop.find_text",
+                "desktop.mouse_move_and_verify",
+                "desktop.click_at_and_verify",
                 "desktop.click_text",
                 "desktop.mouse_click",
             ],
@@ -5224,6 +5451,7 @@ fn fallback_playbook_for_input(input: &str, allowed: &HashSet<String>) -> String
 struct RuntimeDispatcherAdapter {
     inner: Arc<hypr_claw_tools::ToolDispatcherImpl>,
     action_feed: Arc<Mutex<Vec<String>>>,
+    action_counter: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl RuntimeDispatcherAdapter {
@@ -5231,7 +5459,11 @@ impl RuntimeDispatcherAdapter {
         inner: Arc<hypr_claw_tools::ToolDispatcherImpl>,
         action_feed: Arc<Mutex<Vec<String>>>,
     ) -> Self {
-        Self { inner, action_feed }
+        Self {
+            inner,
+            action_feed,
+            action_counter: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Prefix with [task_id] when session_key is a supervisor task (e.g. "user:agent::sup::sup-1").
@@ -5253,6 +5485,34 @@ impl RuntimeDispatcherAdapter {
             }
         }
     }
+
+    fn next_action_index(&self, session_key: &str) -> u64 {
+        if let Ok(mut counters) = self.action_counter.lock() {
+            let entry = counters.entry(session_key.to_string()).or_insert(0);
+            *entry = entry.saturating_add(1);
+            return *entry;
+        }
+        0
+    }
+
+    fn print_action(
+        &self,
+        session_key: &str,
+        index: u64,
+        status: &str,
+        tool_name: &str,
+        detail: &str,
+    ) {
+        let line = format!(
+            "[{:>3}] {:<8} {:<32} {}",
+            index,
+            status,
+            truncate_for_table(tool_name, 32),
+            detail
+        );
+        self.push_action(session_key, line.clone());
+        println!("{line}");
+    }
 }
 
 #[async_trait::async_trait]
@@ -5265,20 +5525,26 @@ impl hypr_claw_runtime::ToolDispatcher for RuntimeDispatcherAdapter {
     ) -> Result<serde_json::Value, hypr_claw_runtime::RuntimeError> {
         let normalized_tool_name = normalize_runtime_tool_name(tool_name);
         let started = std::time::Instant::now();
-        let line = format!(
-            "→ action: {} {}",
-            normalized_tool_name,
-            truncate_for_table(&input.to_string(), 96)
+        let action_index = self.next_action_index(session_key);
+        self.print_action(
+            session_key,
+            action_index,
+            "tool",
+            &normalized_tool_name,
+            &format!("input={}", truncate_for_table(&input.to_string(), 112)),
         );
-        self.push_action(session_key, line.clone());
-        println!("{line}");
         if normalized_tool_name != tool_name {
-            let alias = format!(
-                "  info: remapped non-standard tool '{}' -> '{}'",
-                tool_name, normalized_tool_name
+            self.print_action(
+                session_key,
+                action_index,
+                "alias",
+                &normalized_tool_name,
+                &format!(
+                    "remapped '{}' -> '{}'",
+                    truncate_for_table(tool_name, 24),
+                    truncate_for_table(&normalized_tool_name, 24)
+                ),
             );
-            self.push_action(session_key, alias.clone());
-            println!("{alias}");
         }
         let result = self
             .inner
@@ -5292,14 +5558,20 @@ impl hypr_claw_runtime::ToolDispatcher for RuntimeDispatcherAdapter {
         match result {
             Ok(tool_result) => {
                 if tool_result.success {
-                    let line = format!(
-                        "✓ action: {} completed in {}ms",
-                        normalized_tool_name,
-                        started.elapsed().as_millis()
+                    let output = tool_result.output.unwrap_or(serde_json::json!({}));
+                    let elapsed = started.elapsed().as_millis();
+                    self.print_action(
+                        session_key,
+                        action_index,
+                        "ok",
+                        &normalized_tool_name,
+                        &format!(
+                            "done in {}ms output={}",
+                            elapsed,
+                            truncate_for_table(&output.to_string(), 112)
+                        ),
                     );
-                    self.push_action(session_key, line.clone());
-                    println!("{line}");
-                    Ok(tool_result.output.unwrap_or(serde_json::json!({})))
+                    Ok(output)
                 } else {
                     let base_detail = tool_result
                         .error
@@ -5315,14 +5587,17 @@ impl hypr_claw_runtime::ToolDispatcher for RuntimeDispatcherAdapter {
                             alternatives.join(", ")
                         )
                     };
-                    let line = format!(
-                        "✗ action: {} failed in {}ms - {}",
-                        normalized_tool_name,
-                        started.elapsed().as_millis(),
-                        truncate_for_table(&detail, 84)
+                    self.print_action(
+                        session_key,
+                        action_index,
+                        "fail",
+                        &normalized_tool_name,
+                        &format!(
+                            "failed in {}ms {}",
+                            started.elapsed().as_millis(),
+                            truncate_for_table(&detail, 112)
+                        ),
                     );
-                    self.push_action(session_key, line.clone());
-                    println!("{line}");
                     Err(hypr_claw_runtime::RuntimeError::ToolError(detail))
                 }
             }
@@ -5338,14 +5613,17 @@ impl hypr_claw_runtime::ToolDispatcher for RuntimeDispatcherAdapter {
                         alternatives.join(", ")
                     )
                 };
-                let line = format!(
-                    "✗ action: {} dispatcher error in {}ms - {}",
-                    normalized_tool_name,
-                    started.elapsed().as_millis(),
-                    truncate_for_table(&detail, 84)
+                self.print_action(
+                    session_key,
+                    action_index,
+                    "error",
+                    &normalized_tool_name,
+                    &format!(
+                        "dispatcher in {}ms {}",
+                        started.elapsed().as_millis(),
+                        truncate_for_table(&detail, 112)
+                    ),
                 );
-                self.push_action(session_key, line.clone());
-                println!("{line}");
                 Err(hypr_claw_runtime::RuntimeError::ToolError(detail))
             }
         }
@@ -5363,6 +5641,16 @@ fn fallback_tools_for_tool(tool_name: &str) -> Vec<&'static str> {
         "desktop.ocr_screen" => vec!["desktop.capture_screen"],
         "desktop.click_text" => vec!["desktop.find_text", "desktop.mouse_click"],
         "desktop.find_text" => vec!["desktop.ocr_screen", "desktop.capture_screen"],
+        "desktop.read_screen_state" => vec![
+            "desktop.active_window",
+            "desktop.list_windows",
+            "desktop.cursor_position",
+            "desktop.capture_screen",
+            "desktop.ocr_screen",
+        ],
+        "desktop.mouse_move" => vec!["desktop.mouse_move_and_verify", "desktop.click_at"],
+        "desktop.click_at" => vec!["desktop.click_at_and_verify", "desktop.mouse_click"],
+        "desktop.click_at_and_verify" => vec!["desktop.mouse_move_and_verify", "desktop.click_at"],
         "hypr.workspace.switch" => vec!["hypr.exec"],
         "hypr.window.focus" => vec!["hypr.exec"],
         "hypr.window.move" => vec!["hypr.exec"],

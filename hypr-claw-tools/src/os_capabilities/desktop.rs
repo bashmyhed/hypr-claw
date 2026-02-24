@@ -1,7 +1,7 @@
 //! Desktop operations - launching apps, browser ops, and GUI automation.
 
 use super::{OsError, OsResult};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -122,6 +122,43 @@ async fn run_output(command: &str, args: &[&str]) -> OsResult<String> {
     Err(OsError::OperationFailed(
         String::from_utf8_lossy(&output.stderr).to_string(),
     ))
+}
+
+fn parse_cursor_position(raw: &str) -> Option<(i32, i32)> {
+    if let Ok(json) = serde_json::from_str::<Value>(raw) {
+        if let Some(obj) = json.as_object() {
+            if let (Some(x), Some(y)) = (obj.get("x"), obj.get("y")) {
+                if let (Some(x), Some(y)) = (x.as_f64(), y.as_f64()) {
+                    return Some((x.round() as i32, y.round() as i32));
+                }
+            }
+        }
+    }
+
+    let mut nums = Vec::<i32>::new();
+    let mut token = String::new();
+    for ch in raw.chars() {
+        if ch.is_ascii_digit() || (token.is_empty() && ch == '-') {
+            token.push(ch);
+            continue;
+        }
+        if !token.is_empty() {
+            if let Ok(v) = token.parse::<i32>() {
+                nums.push(v);
+            }
+            token.clear();
+        }
+    }
+    if !token.is_empty() {
+        if let Ok(v) = token.parse::<i32>() {
+            nums.push(v);
+        }
+    }
+    if nums.len() >= 2 {
+        Some((nums[0], nums[1]))
+    } else {
+        None
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -656,11 +693,196 @@ pub async fn click_at(x: i32, y: i32, button: &str) -> OsResult<()> {
     mouse_click(button).await
 }
 
+/// Read cursor position using Hyprland.
+pub async fn cursor_position() -> OsResult<(i32, i32)> {
+    let output_json = Command::new("hyprctl")
+        .args(["cursorpos", "-j"])
+        .output()
+        .await?;
+    if output_json.status.success() {
+        let raw = String::from_utf8_lossy(&output_json.stdout).to_string();
+        if let Some(pos) = parse_cursor_position(&raw) {
+            return Ok(pos);
+        }
+    }
+
+    let output_plain = Command::new("hyprctl").args(["cursorpos"]).output().await?;
+    if output_plain.status.success() {
+        let raw = String::from_utf8_lossy(&output_plain.stdout).to_string();
+        if let Some(pos) = parse_cursor_position(&raw) {
+            return Ok(pos);
+        }
+    }
+
+    Err(OsError::OperationFailed(
+        "Unable to read cursor position from hyprctl".to_string(),
+    ))
+}
+
+/// Move cursor and verify it reached target.
+pub async fn mouse_move_and_verify(
+    x: i32,
+    y: i32,
+    tolerance: i32,
+    timeout_ms: u64,
+) -> OsResult<(i32, i32)> {
+    mouse_move_absolute(x, y).await?;
+    let tol = tolerance.max(0);
+    let timeout = Duration::from_millis(timeout_ms.max(120));
+    let started = Instant::now();
+    let mut last_seen: Option<(i32, i32)> = None;
+    let mut last_error: Option<String> = None;
+
+    loop {
+        match cursor_position().await {
+            Ok((cx, cy)) => {
+                last_seen = Some((cx, cy));
+                if (cx - x).abs() <= tol && (cy - y).abs() <= tol {
+                    return Ok((cx, cy));
+                }
+            }
+            Err(err) => last_error = Some(err.to_string()),
+        }
+
+        if started.elapsed() >= timeout {
+            return Err(OsError::OperationFailed(format!(
+                "cursor verify timeout target=({}, {}) tol={} last_seen={:?}{}",
+                x,
+                y,
+                tol,
+                last_seen,
+                last_error
+                    .as_deref()
+                    .map(|e| format!(" last_error={e}"))
+                    .unwrap_or_default()
+            )));
+        }
+        sleep(Duration::from_millis(35)).await;
+    }
+}
+
+/// Click at coordinate and verify cursor state after click.
+pub async fn click_at_and_verify(
+    x: i32,
+    y: i32,
+    button: &str,
+    tolerance: i32,
+    timeout_ms: u64,
+) -> OsResult<Value> {
+    let before = cursor_position().await.ok();
+    let moved = mouse_move_and_verify(x, y, tolerance, timeout_ms).await?;
+    click_at(x, y, button).await?;
+    sleep(Duration::from_millis(80)).await;
+    let after = cursor_position().await.ok();
+
+    Ok(json!({
+        "target": {"x": x, "y": y},
+        "button": button,
+        "before": before.map(|(x, y)| json!({"x": x, "y": y})).unwrap_or(json!(null)),
+        "moved": {"x": moved.0, "y": moved.1},
+        "after": after.map(|(x, y)| json!({"x": x, "y": y})).unwrap_or(json!(null))
+    }))
+}
+
+/// Combined screen read state for agent observation (window/cursor/screenshot/OCR).
+pub async fn read_screen_state(
+    include_ocr: bool,
+    include_windows: bool,
+    include_cursor: bool,
+    include_screenshot: bool,
+    lang: Option<&str>,
+    window_limit: usize,
+    max_ocr_matches: usize,
+) -> OsResult<Value> {
+    let mut warnings = Vec::<String>::new();
+    let mut screenshot_path: Option<String> = None;
+    let mut active_window_json = Value::Null;
+    let mut windows_json = Vec::<Value>::new();
+    let mut cursor_json = Value::Null;
+    let mut ocr_text = String::new();
+    let mut ocr_matches = Vec::<OcrMatch>::new();
+
+    if include_windows {
+        match active_window().await {
+            Ok(v) => active_window_json = v,
+            Err(err) => warnings.push(format!("active_window: {}", err)),
+        }
+        match list_windows(window_limit.max(1)).await {
+            Ok(v) => windows_json = v,
+            Err(err) => warnings.push(format!("list_windows: {}", err)),
+        }
+    }
+
+    if include_cursor {
+        match cursor_position().await {
+            Ok((x, y)) => cursor_json = json!({"x": x, "y": y}),
+            Err(err) => warnings.push(format!("cursor_position: {}", err)),
+        }
+    }
+
+    if include_screenshot || include_ocr {
+        match capture_screen(None).await {
+            Ok(path) => screenshot_path = Some(path),
+            Err(err) => warnings.push(format!("capture_screen: {}", err)),
+        }
+    }
+
+    if include_ocr {
+        let ocr_result = if let Some(path) = screenshot_path.as_deref() {
+            ocr_screen(Some(path), lang).await
+        } else {
+            ocr_screen(None, lang).await
+        };
+        match ocr_result {
+            Ok((text, mut matches)) => {
+                ocr_text = text;
+                if max_ocr_matches > 0 && matches.len() > max_ocr_matches {
+                    matches.truncate(max_ocr_matches);
+                }
+                ocr_matches = matches;
+            }
+            Err(err) => warnings.push(format!("ocr_screen: {}", err)),
+        }
+    }
+
+    if screenshot_path.is_none()
+        && active_window_json.is_null()
+        && windows_json.is_empty()
+        && cursor_json.is_null()
+        && ocr_text.is_empty()
+    {
+        return Err(OsError::OperationFailed(format!(
+            "unable to read screen state{}",
+            if warnings.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", warnings.join(" | "))
+            }
+        )));
+    }
+
+    Ok(json!({
+        "screenshot_path": screenshot_path,
+        "active_window": active_window_json,
+        "windows": windows_json,
+        "cursor": cursor_json,
+        "ocr_text": ocr_text,
+        "ocr_matches": ocr_matches,
+        "warnings": warnings
+    }))
+}
+
 /// Capture current screen to file and return saved path.
 pub async fn capture_screen(path: Option<&str>) -> OsResult<String> {
     let target = path
         .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("/tmp/hypr-claw-shot-{}.png", chrono::Utc::now().timestamp()));
+        .unwrap_or_else(|| format!("/tmp/hypr-claw-shot-{}.png", chrono::Utc::now().timestamp_millis()));
+
+    if let Some(parent) = Path::new(&target).parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+    }
 
     if command_exists("grim").await {
         run_checked("grim", &[&target]).await?;
@@ -727,6 +949,152 @@ fn parse_tesseract_tsv(tsv: &str) -> Vec<OcrMatch> {
     matches
 }
 
+fn normalize_for_match(input: &str, case_sensitive: bool) -> String {
+    let mut out = String::new();
+    let mut last_was_space = true;
+    for ch in input.chars() {
+        let mapped = if case_sensitive {
+            ch
+        } else {
+            ch.to_ascii_lowercase()
+        };
+        if mapped.is_ascii_alphanumeric() {
+            out.push(mapped);
+            last_was_space = false;
+            continue;
+        }
+        if !last_was_space {
+            out.push(' ');
+            last_was_space = true;
+        }
+    }
+    out.trim().to_string()
+}
+
+fn build_phrase_matches(
+    query: &str,
+    words: &[OcrMatch],
+    case_sensitive: bool,
+    min_confidence: f32,
+    limit: usize,
+) -> Vec<OcrMatch> {
+    let query_norm = normalize_for_match(query, case_sensitive);
+    if query_norm.is_empty() {
+        return Vec::new();
+    }
+
+    let mut kept_words = Vec::<OcrMatch>::new();
+    let mut normalized_words = Vec::<String>::new();
+    for word in words {
+        if word.confidence < min_confidence {
+            continue;
+        }
+        let normalized = normalize_for_match(&word.text, case_sensitive);
+        if normalized.is_empty() {
+            continue;
+        }
+        kept_words.push(word.clone());
+        normalized_words.push(normalized);
+    }
+    if kept_words.is_empty() {
+        return Vec::new();
+    }
+
+    let mut full = String::new();
+    let mut spans = Vec::<(usize, usize)>::new();
+    for token in &normalized_words {
+        if !full.is_empty() {
+            full.push(' ');
+        }
+        let start = full.len();
+        full.push_str(token);
+        let end = full.len();
+        spans.push((start, end));
+    }
+
+    let mut results = Vec::<OcrMatch>::new();
+    let mut search_from = 0usize;
+    while let Some(rel) = full.get(search_from..).and_then(|s| s.find(&query_norm)) {
+        let abs = search_from + rel;
+        let abs_end = abs + query_norm.len();
+
+        let start_idx = spans
+            .iter()
+            .position(|(_, end)| *end > abs)
+            .unwrap_or(0);
+        let end_idx = spans
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, (start, _))| *start < abs_end)
+            .map(|(idx, _)| idx)
+            .unwrap_or(start_idx);
+
+        let slice = &kept_words[start_idx..=end_idx];
+        let text = slice
+            .iter()
+            .map(|w| w.text.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let confidence = slice.iter().map(|w| w.confidence).sum::<f32>() / slice.len() as f32;
+        let x = slice.iter().map(|w| w.x).min().unwrap_or(0);
+        let y = slice.iter().map(|w| w.y).min().unwrap_or(0);
+        let max_x = slice.iter().map(|w| w.x + w.width).max().unwrap_or(x);
+        let max_y = slice.iter().map(|w| w.y + w.height).max().unwrap_or(y);
+        let width = (max_x - x).max(1);
+        let height = (max_y - y).max(1);
+
+        results.push(OcrMatch {
+            text,
+            confidence,
+            x,
+            y,
+            width,
+            height,
+            center_x: x + width / 2,
+            center_y: y + height / 2,
+        });
+        if limit > 0 && results.len() >= limit {
+            break;
+        }
+        search_from = abs.saturating_add(1);
+    }
+
+    if !results.is_empty() {
+        return results;
+    }
+
+    kept_words
+        .into_iter()
+        .filter(|word| normalize_for_match(&word.text, case_sensitive).contains(&query_norm))
+        .take(limit.max(1))
+        .collect()
+}
+
+async fn ocr_screen_with_retries(
+    lang: Option<&str>,
+    max_attempts: usize,
+    retry_delay_ms: u64,
+) -> OsResult<(String, Vec<OcrMatch>)> {
+    let attempts = max_attempts.max(1);
+    let mut last_error: Option<String> = None;
+    for attempt in 0..attempts {
+        match ocr_screen(None, lang).await {
+            Ok((text, words)) if !words.is_empty() => return Ok((text, words)),
+            Ok((_text, _words)) => {
+                last_error = Some("OCR returned empty text".to_string());
+            }
+            Err(err) => last_error = Some(err.to_string()),
+        }
+        if attempt + 1 < attempts {
+            sleep(Duration::from_millis(retry_delay_ms.max(80))).await;
+        }
+    }
+    Err(OsError::OperationFailed(last_error.unwrap_or_else(|| {
+        "OCR failed without detailed error".to_string()
+    })))
+}
+
 /// OCR current screen and return recognized words with boxes.
 pub async fn ocr_screen(
     path: Option<&str>,
@@ -772,22 +1140,14 @@ pub async fn find_text(
         ));
     }
 
-    let (_, words) = ocr_screen(None, lang).await?;
-    let mut found = Vec::new();
-    for word in words {
-        let hit = if case_sensitive {
-            word.text.contains(query)
-        } else {
-            word.text.to_lowercase().contains(&query.to_lowercase())
-        };
-        if hit {
-            found.push(word);
-            if limit > 0 && found.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(found)
+    let (_, words) = ocr_screen_with_retries(lang, 2, 120).await?;
+    Ok(build_phrase_matches(
+        query,
+        &words,
+        case_sensitive,
+        25.0,
+        if limit == 0 { usize::MAX } else { limit },
+    ))
 }
 
 /// Find text on screen and click its center.
@@ -798,16 +1158,24 @@ pub async fn click_text(
     case_sensitive: bool,
     lang: Option<&str>,
 ) -> OsResult<OcrMatch> {
-    let matches = find_text(query, case_sensitive, occurrence + 1, lang).await?;
-    if matches.len() <= occurrence {
-        return Err(OsError::NotFound(format!(
-            "text '{}' not found on screen",
-            query
-        )));
+    let mut tries = 0usize;
+    loop {
+        let matches = find_text(query, case_sensitive, occurrence + 1, lang).await?;
+        if matches.len() > occurrence {
+            let target = matches[occurrence].clone();
+            click_at(target.center_x, target.center_y, button).await?;
+            return Ok(target);
+        }
+
+        tries += 1;
+        if tries >= 3 {
+            return Err(OsError::NotFound(format!(
+                "text '{}' not found on screen",
+                query
+            )));
+        }
+        sleep(Duration::from_millis(150)).await;
     }
-    let target = matches[occurrence].clone();
-    click_at(target.center_x, target.center_y, button).await?;
-    Ok(target)
 }
 
 /// Wait until text appears on screen and return first match.
@@ -828,16 +1196,27 @@ pub async fn wait_for_text(
     let poll = Duration::from_millis(poll_interval_ms.max(100));
     let started = Instant::now();
 
+    let mut last_error: Option<String> = None;
     loop {
-        let matches = find_text(query, case_sensitive, 1, lang).await?;
-        if let Some(first) = matches.into_iter().next() {
-            return Ok(first);
+        match find_text(query, case_sensitive, 1, lang).await {
+            Ok(matches) => {
+                if let Some(first) = matches.into_iter().next() {
+                    return Ok(first);
+                }
+            }
+            Err(err) => {
+                last_error = Some(err.to_string());
+            }
         }
         if started.elapsed() >= timeout {
             return Err(OsError::NotFound(format!(
-                "text '{}' not found within {}ms",
+                "text '{}' not found within {}ms{}",
                 query,
-                timeout.as_millis()
+                timeout.as_millis(),
+                last_error
+                    .as_deref()
+                    .map(|e| format!(" (last error: {e})"))
+                    .unwrap_or_default()
             )));
         }
         sleep(poll).await;
